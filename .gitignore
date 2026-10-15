@@ -1,0 +1,30 @@
+# Data (never commit the Kaggle files)
+data/
+*.csv
+*.txt
+!requirements*.txt
+!sample_data/**
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Spark local output
+spark-warehouse/
+metastore_db/
+derby.log
+output/
+
+# Secrets / env
+.env
+.streamlit/secrets.toml
+kaggle.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
