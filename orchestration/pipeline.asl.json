@@ -1,7 +1,0 @@
-{
-  "Comment": "TODO: partition -> load schemes -> Map over weeks (clean) -> BQ1 -> BQ2 -> SNS on flagged weeks",
-  "StartAt": "Placeholder",
-  "States": {
-    "Placeholder": { "Type": "Pass", "End": true }
-  }
-}

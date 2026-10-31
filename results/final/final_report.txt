@@ -1,0 +1,63 @@
+=== HI-Large � STAGE 1 (frozen threshold 0.9753)
+      level           cutoff  alerts  true_alerts  positives  precision  recall    f1  alerts_per_day  pr_auc  recall_patterns  recall_unclassified
+    payment       top100/day    1400         1392      31631      0.994   0.044 0.084         100.000   0.632              NaN                  NaN
+account_day       top100/day    1400         1400      55060      1.000   0.025 0.050         100.000   0.662              NaN                  NaN
+    payment       top500/day    7000         6941      31631      0.992   0.219 0.359         500.000   0.632              NaN                  NaN
+account_day       top500/day    7000         6998      55060      1.000   0.127 0.226         500.000   0.662              NaN                  NaN
+    payment      top5000/day   70000        21456      31631      0.307   0.678 0.422        5000.000   0.632              NaN                  NaN
+account_day      top5000/day   70000        33941      55060      0.485   0.616 0.543        5000.000   0.662              NaN                  NaN
+    payment       top250/day    3500         3482      31631      0.995   0.110 0.198         250.000   0.632              NaN                  NaN
+    payment      top1000/day   14000        13517      31631      0.966   0.427 0.592        1000.000   0.632              NaN                  NaN
+    payment      top2000/day   28000        18060      31631      0.645   0.571 0.606        2000.000   0.632              NaN                  NaN
+account_day      top1000/day   14000        13994      55060      1.000   0.254 0.405        1000.000   0.662              NaN                  NaN
+account_day       top250/day    3500         3500      55060      1.000   0.064 0.120         250.000   0.662              NaN                  NaN
+account_day      top2000/day   28000        26819      55060      0.958   0.487 0.646        2000.000   0.662              NaN                  NaN
+    payment frozen_threshold   18764        16341      31631      0.871   0.517 0.649        1340.286   0.632            0.857                0.006
+account_day frozen_threshold   31762        28604      55060      0.901   0.520 0.659        2268.714   0.662            0.855                0.007
+
+=== detection per pattern
+      level  pattern_label  positives  caught  recall
+account_day      bipartite       2974    2413   0.811
+account_day          cycle       3174    2740   0.863
+account_day         fan_in       3307    2884   0.872
+account_day        fan_out       3058    2638   0.863
+account_day gather_scatter       5041    4389   0.871
+account_day         random       2493    2133   0.856
+account_day scatter_gather       6475    5648   0.872
+account_day          stack       6739    5602   0.831
+account_day   unclassified      21799     157   0.007
+    payment      bipartite       1600    1303   0.814
+    payment          cycle       1828    1580   0.864
+    payment         fan_in       1869    1614   0.864
+    payment        fan_out       1768    1537   0.869
+    payment gather_scatter       3076    2677   0.870
+    payment         random       1411    1215   0.861
+    payment scatter_gather       3870    3378   0.873
+    payment          stack       3563    2964   0.832
+    payment   unclassified      12646      73   0.006
+
+=== schemes: caught and how early
+  pattern_type  schemes  caught  median_hours_to_first_flag  median_duration_h  share_from_first_flag alert_before_end_eod
+     bipartite      296   0.946                         0.0             25.742                  0.977             0.535714
+         cycle      318   0.931                         0.0              8.325                  0.967             0.463087
+        fan_in      303   0.898                         0.0              0.000                  0.984             0.435252
+       fan_out      294   0.932                         0.0              0.000                  0.971             0.453237
+gather_scatter      281   0.943                         0.0             20.817                  0.962             0.507519
+        random      281   0.911                         0.0              0.000                  0.971             0.370656
+scatter_gather      299   0.943                         0.0             61.383                  0.964             0.646643
+         stack      317   0.946                         0.0             56.783                  0.975             0.639073
+{'schemes': 2389, 'caught': 0.9313520301381331, 'median_hours_to_first_flag': 0.0, 'median_duration_h': 17.25, 'share_from_first_flag': 0.9714464466282048, 'alert_before_end_eod': 0.4780242779405609}
+
+=== STAGE 2 END TO END (group namer)
+           pattern  true_cases  named_as  correct  precision  recall    f1
+             cycle        3174      1607      425      0.264   0.134 0.178
+            fan_in        3307      2100      585      0.279   0.177 0.216
+           fan_out        3058      2747      788      0.287   0.258 0.271
+    gather_scatter        5041      3767     1075      0.285   0.213 0.244
+          layering        9713     16170     6181      0.382   0.636 0.478
+            random        2493      1314      361      0.275   0.145 0.190
+    scatter_gather        6475      2000      890      0.445   0.137 0.210
+      unclassified       21799      2057       76      0.037   0.003 0.006
+MACRO (7 patterns)       33261     29705    10305      0.317   0.243 0.255
+
+wrote dashboard_data.json

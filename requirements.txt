@@ -1,11 +1,8 @@
-# Local dev / tests (Glue 4.0 runs Spark 3.3, Python 3.10)
-pyspark==3.3.2
-pytest==8.3.3
-
-# Scripts & dashboard
-boto3==1.35.36
-kaggle==1.6.17
-streamlit==1.39.0
-pyathena==3.9.0
-pandas==2.2.3
-plotly==5.24.1
+# laptop: reports + Streamlit app
+pandas
+pyarrow
+numpy
+streamlit
+altair
+awscli
+# cluster nodes get their libraries from pipeline/install_libs.sh (EMR bootstrap action)
