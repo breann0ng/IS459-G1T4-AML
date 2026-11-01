@@ -1,0 +1,36 @@
+
+=================== txn_v3m
+run at 2026-10-30 17:48:25 � 179 features � threshold 0.9753 � params {"n_estimators": 1000, "num_leaves": 127, "learning_rate": 0.03, "subsample": 0.8, "subsample_freq": 1, "colsample_bytree": 0.4, "min_child_samples": 100, "random_state": 42, "verbose": -1, "scale_pos_weight": 1}
+STAGE 1 (validation best-F1 threshold)
+  dataset              level  precision  recall    f1  alerts_per_day  pr_auc  recall_patterns  recall_unclassified
+HI-Medium account_day_rollup      0.909   0.539 0.677         2148.75   0.677              NaN                  NaN
+HI-Medium        transaction      0.894   0.555 0.685         1428.25   0.670            0.889                0.008
+ HI-Small account_day_rollup      0.894   0.505 0.645          423.50   0.637              NaN                  NaN
+ HI-Small        transaction      0.889   0.539 0.671          289.50   0.661            0.877                0.005
+top features (share of total gain): t_fmt_ach 14.2%, t_pair_age_d 13.0%, r_age_days 4.8%, s_n_cross_ccy 4.0%, t_pair_n_7d 3.7%, t_amt_rel 3.4%, r_x_trend 3.3%, s_age_days 2.6%, r_x_new_cp_in 1.6%, t_fmt_credit_card 1.6%, s_n_out 1.3%, r_cycles_today 1.3%, s_cycles_today 1.2%, s_cycles_7d 1.2%, s_out_cp_max_senders 1.1%
+
+STAGE 2 END TO END (label precision / recall / F1 over stage 1's alerts) + caught F1 + oracle F1 (diagnostic)
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1  oracle_f1
+pattern                                                                                                     
+fan_in                     943       799      281            0.352       0.298   0.323      0.350      0.326
+fan_out                    700       841      227            0.270       0.324   0.295      0.316      0.311
+gather_scatter            1604      1739      712            0.409       0.444   0.426      0.452      0.437
+scatter_gather            1264      1609      617            0.383       0.488   0.430      0.458      0.441
+cycle                      795       683      185            0.271       0.233   0.250      0.275      0.271
+random                     669       613      143            0.233       0.214   0.223      0.242      0.239
+layering                  2754      1872      847            0.452       0.308   0.366      0.426      0.429
+unclassified              5767       439       31            0.071       0.005   0.010      0.263      0.941
+MACRO (7 patterns)        8729      8156     3012            0.339       0.330   0.330      0.360      0.351
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1  oracle_f1
+pattern                                                                                                     
+fan_in                      76        79       23            0.291       0.303   0.297      0.341      0.323
+fan_out                     86        77       29            0.377       0.337   0.356      0.377      0.349
+gather_scatter             171       136       67            0.493       0.392   0.436      0.475      0.461
+scatter_gather             139       144       71            0.493       0.511   0.502      0.520      0.498
+cycle                       83        65       20            0.308       0.241   0.270      0.310      0.268
+random                      57        73       19            0.260       0.333   0.292      0.330      0.303
+layering                   239       220      110            0.500       0.460   0.479      0.554      0.547
+unclassified               648        53        0            0.000       0.000   0.000      0.000      0.928
+MACRO (7 patterns)         851       794      339            0.389       0.368   0.376      0.415      0.393
