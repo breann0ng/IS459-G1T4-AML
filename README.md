@@ -19,9 +19,9 @@ Trained on HI-Small + HI-Medium, tested once on unseen HI-Large (12–25 Sep 202
 | Laundering account-days caught (recall) | 52.0% (85.5% for named patterns, 0.7% for unclassified) |
 | F1 (validation Small / Medium → test Large) | 0.645 / 0.677 → 0.659 |
 | Alerts per day | ~2,269 |
-| Schemes flagged · first flag within 1 h | 93.1% · 91.7% |
-| Scheme payments at or after the first flag | 97.1% |
-| Stage 2 macro F1, end to end | 0.255 (layering 0.478) |
+| Schemes flagged | 93.1% |
+| Schemes still running when the end-of-day alert arrives | 47.8% |
+| Stage 2 macro F1, end to end (experimental) | 0.255 (layering 0.478) |
 
 Full numbers: [`results/final/final_report.txt`](results/final/final_report.txt) and [`results/final/validate_report.txt`](results/final/validate_report.txt).
 
@@ -94,6 +94,8 @@ AWS `credentials`, `.pem` keys, `kaggle.json`. They are listed in `.gitignore`.
 ## Limits
 
 - HI-Large was tested on a two-week window to fit the lab budget.
+- Payments are scored when their day closes, because the features describe the whole day. The `0.0` median hours to first flag and the 97.1% share from first flag in `final_report.txt` assume same-moment scoring, so they are not reported as results.
 - Unclassified laundering (no known pattern) is mostly missed.
-- Stage 2 over-names layering on HI-Large.
+- Stage 2 over-names layering on HI-Large, so its pattern names are experimental hints.
+- Results are not broken down by payment channel.
 - Synthetic data: real banks' volumes and patterns will differ.
