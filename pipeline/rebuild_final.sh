@@ -5,6 +5,7 @@
 #
 #   export AML_BUCKET=<your bucket name>
 #   nohup bash rebuild_final.sh > rebuild.log 2>&1 &
+#   TRAIN_ONLY=1 nohup bash rebuild_final.sh > rebuild.log 2>&1 &     experiments: no HI-Large
 #
 # Needs: ~/.kaggle/kaggle.json (legacy token), Java 17 on PATH, all scripts in this folder,
 #        and the cluster created with the bootstrap action s3://<bucket>/scripts/install_libs.sh
@@ -46,14 +47,18 @@ java -version 2>&1 | grep -q '"17' || { echo "Java 17 is not active: run the fir
 pip3 install --user -q pandas pyarrow scikit-learn lightgbm networkx xxhash > logs/pip.log 2>&1 \
   || { echo "pip install failed (see logs/pip.log)"; exit 1; }
 
+# TRAIN_ONLY=1: build HI-Small + HI-Medium, run the stage 1 and stage 2 baselines, stop
+# before anything touches HI-Large (for experiments)
+SETS="HI-Small HI-Medium HI-Large"
+[ -n "$TRAIN_ONLY" ] && SETS="HI-Small HI-Medium"
 # 1. raw data from Kaggle
-for D in HI-Small HI-Medium HI-Large; do
+for D in $SETS; do
   step dl_trans_$D     download "${D}_Trans.csv"    "$AML_ROOT/raw/transactions/set=$D/${D}_Trans.csv"
   step dl_patterns_$D  download "${D}_Patterns.txt" "$AML_ROOT/raw/patterns/set=$D/${D}_Patterns.txt"
   step dl_accounts_$D  download "${D}_accounts.csv" "$AML_ROOT/raw/accounts/set=$D/${D}_accounts.csv"
 done
 # 2. clean + answer key
-for D in HI-Small HI-Medium HI-Large; do
+for D in $SETS; do
   step clean_$D     $SUBMIT clean_transactions_spark.py $D
   step patterns_$D  $SUBMIT parse_patterns_spark.py $D
 done
@@ -65,6 +70,11 @@ for D in HI-Small HI-Medium; do
 done
 # 4. validation run (threshold + check against round 3), 5. frozen models
 step validate     python3 -u train_txn.py --txn-table txn_features_v3 --stage2-features features_v3 --preset p3 --merge-layering --config txn_v3m
+if [ -n "$TRAIN_ONLY" ]; then
+  step grp_baseline  python3 -u group_stage2.py txn_v3m
+  echo "=== $(date '+%m-%d %H:%M') TRAIN_ONLY done: baselines txn_v3m + txn_v3m_grp saved, HI-Large not touched"
+  exit 0
+fi
 step final_train  python3 -u final_train.py txn_v3m
 # 6. HI-Large test window (each chunk reads 21 days of history before it)
 step feat_large   $SUBMIT build_features_spark.py HI-Large $WINDOW_FROM $WINDOW_TO

@@ -1,0 +1,19 @@
+=== STAGE 2 · validation · end to end · macro over named patterns (unclassified excluded)
+                                    f1_HI-Medium  f1_HI-Small  precision_HI-Medium  precision_HI-Small  recall_HI-Medium  recall_HI-Small  mean_f1
+run                                                                                                                                               
+s2_combo1_grp                              0.486        0.448                0.512               0.476             0.470            0.432    0.467
+s2_link3_grp                               0.482        0.445                0.507               0.474             0.468            0.429    0.464
+s2_slow800_grp                             0.486        0.440                0.510               0.477             0.469            0.426    0.463
+s2_keep30_grp                              0.473        0.450                0.494               0.490             0.459            0.434    0.462
+s2_keep100_grp                             0.478        0.440                0.516               0.491             0.460            0.422    0.459
+txn_v3m_grp                                0.481        0.434                0.502               0.467             0.467            0.421    0.457
+s2_leaves63_grp                            0.487        0.424                0.523               0.466             0.465            0.411    0.456
+s2_hub60_grp                               0.476        0.433                0.499               0.472             0.460            0.421    0.455
+s2_minchild50_grp                          0.479        0.426                0.501               0.459             0.465            0.414    0.453
+s2_linked5_grp                             0.487        0.417                0.509               0.447             0.473            0.399    0.452
+s2_hub15_grp                               0.473        0.428                0.493               0.461             0.458            0.418    0.450
+s2_link1_grp                               0.457        0.440                0.479               0.477             0.442            0.429    0.449
+account namer (before group shape)         0.329        0.365                0.338               0.375             0.328            0.361    0.347
+
+baseline txn_v3m_grp · showing s2_combo1_grp
+wrote /home/hadoop/app/data/stage2_data.json

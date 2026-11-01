@@ -12,6 +12,7 @@ Plain Python on one machine (laptop or EMR master), after build_txn_features_spa
     python3 train_txn.py --merge-layering --config txn_merge     stage 2 with 7 classes
     python3 train_txn.py --txn-table txn_features_v3 --stage2-features features_v3 --preset p3 --config txn_v3
                                                             round 3 step 2 features
+    python3 train_txn.py --train-datasets HI-Small --config txn_small   train/validate on one dataset
     python3 train_txn.py --config txn_final --test          final run only
 
 Split (same rule as train_ml.py cross_dataset)
@@ -217,9 +218,12 @@ def topk(date, s, k):
 
 
 def main():
-    global CONFIG_NAME
+    global CONFIG_NAME, TRAIN_DATASETS
     ap = argparse.ArgumentParser(description="Transaction-level laundering model")
     ap.add_argument("--config", default=CONFIG_NAME)
+    ap.add_argument("--train-datasets", default=",".join(TRAIN_DATASETS),
+                    help="comma-separated datasets to train and validate on, e.g. HI-Small "
+                         "(default HI-Small,HI-Medium; never HI-Large)")
     ap.add_argument("--param", action="append", default=[], metavar="KEY=VALUE")
     ap.add_argument("--test", action="store_true", help="also score TEST_DATASET (final run only)")
     ap.add_argument("--preset", choices=list(PRESETS), help="tuning preset (p1, p2, p3)")
@@ -238,6 +242,9 @@ def main():
                          "t = new payment features; e.g. --new-groups x (default all)")
     a = ap.parse_args()
     CONFIG_NAME = a.config
+    TRAIN_DATASETS = [d for d in a.train_datasets.split(",") if d]
+    if not TRAIN_DATASETS or TEST_DATASET in TRAIN_DATASETS:
+        ap.error(f"--train-datasets must be non-empty and must not include {TEST_DATASET}")
     PARAMS.update(PRESETS.get(a.preset, {}))
     PARAMS.update({k: value(v) for k, v in (p.split("=", 1) for p in a.param)})
 

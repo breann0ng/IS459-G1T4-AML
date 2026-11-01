@@ -83,6 +83,15 @@ streamlit run app_bq1.py
 
 ![BQ1 app](docs/figures/bq1_streamlit.png)
 
+**Stage 2 page (validation only, no HI-Large).** After `group_stage2.py` runs on the cluster:
+
+```bash
+set AML_ROOT=s3://<bucket>
+python pipeline/stage2_report.py              # leaderboard of every *_grp run, writes app/data/stage2_data.json
+cd app
+streamlit run app_stage2.py
+```
+
 ## Data
 
 IBM Transactions for Anti-Money Laundering (Kaggle, `ealtman2019/ibm-transactions-for-anti-money-laundering-aml`). Not stored in this repo: the pipeline downloads it straight into S3.

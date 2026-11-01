@@ -5,6 +5,8 @@ Round 3, step 3: name the pattern from the GROUP's shape, fixed version of Task 
 Plain Python on the EMR primary node (needs scheme_stage2.py in the same folder):
     pip3 install --user pandas pyarrow scikit-learn lightgbm networkx
     python3 group_stage2.py txn_v3m                 stage 1 + namer = that train_txn.py run
+    python3 group_stage2.py txn_v3m --param num_leaves=63 --out-config s2_leaves63
+                                                    one namer / grouping setting changed
 
 What changed from Task C (scheme_stage2.py)
     1. Groups are built from the PAYMENT model's alerts (txn_alerts of the given run), which
@@ -22,7 +24,8 @@ What changed from Task C (scheme_stage2.py)
 
 Reads   analytics/txn_alerts, analytics/txn_results (the run), curated/<features>(_sample),
         curated/transactions (only payments between the accounts involved)
-Writes  analytics/group_stage2/  per class P / R / F1 per dataset, method and mode
+Writes  analytics/group_stage2/            per class P / R / F1 per dataset, method and mode
+        analytics/group_stage2_confusion/  alerts per true x predicted pattern (dashboard)
 """
 
 import argparse
@@ -105,13 +108,40 @@ def class_table(true, pred, classes, total_true=None):
     return pd.concat([t, pd.DataFrame([macro])], ignore_index=True)
 
 
+def value(text):
+    for cast in (int, float):
+        try:
+            return cast(text)
+        except ValueError:
+            pass
+    return text
+
+
 def main():
+    global KEEP_RATES, HUB_DEGREE, MAX_LINKED_DAYS
     ap = argparse.ArgumentParser(description="Group-level stage 2, end to end")
     ap.add_argument("stage1", help="config of a train_txn.py run, e.g. txn_v3m")
     ap.add_argument("--features", default="features_v3", help="account-day table (namer features)")
-    ap.add_argument("--out-config", help="name to save under (default <stage1>_grp)")
+    ap.add_argument("--out-config", help="name to save under (default <stage1>_grp; _grp is "
+                                             "added if missing, txn_report.py needs it)")
+    ap.add_argument("--param", action="append", default=[], metavar="KEY=VALUE",
+                    help="override a namer LightGBM setting, e.g. --param num_leaves=63 (repeatable)")
+    ap.add_argument("--keep-rates", help=f"training fragment levels, e.g. 1,0.7 (default "
+                                         f"{','.join(map(str, KEEP_RATES))})")
+    ap.add_argument("--hub-degree", type=int, default=HUB_DEGREE)
+    ap.add_argument("--max-linked-days", type=int, default=MAX_LINKED_DAYS)
+    ap.add_argument("--link-days", type=int, default=S.LINK_DAYS)
     a = ap.parse_args()
     out_cfg = a.out_config or f"{a.stage1}_grp"
+    if not out_cfg.endswith("_grp"):
+        out_cfg += "_grp"
+    if a.keep_rates:
+        KEEP_RATES = [float(k) for k in a.keep_rates.split(",")]
+    HUB_DEGREE, MAX_LINKED_DAYS, S.LINK_DAYS = a.hub_degree, a.max_linked_days, a.link_days
+    S.STAGE2_PARAMS.update({k: value(v) for k, v in (p.split("=", 1) for p in a.param)})
+    settings = {"namer_params": S.STAGE2_PARAMS, "keep_rates": KEEP_RATES, "hub_degree": HUB_DEGREE,
+                "max_linked_days": MAX_LINKED_DAYS, "link_days": S.LINK_DAYS, "features": a.features}
+    print(f"[settings] {json.dumps(settings)}")
     t0 = time.time()
 
     res = S.load_table("txn_results", ds.field("config") == a.stage1)
@@ -147,7 +177,7 @@ def main():
 
     # ---- validation rows: the alerts (to name) + all true laundering (recall denominators)
     full = S.open_dataset(f"{S.CURATED}/{a.features}")
-    tables = []
+    tables, confusion = [], []
     for d, al in alerts.groupby("dataset"):
         keys = set(zip(al["acct_bank"].astype(int), al["acct"], al["date"]))
         flt = (ds.field("dataset") == d) & (ds.field("date") > pa.scalar(train_end[d], pa.date32()))
@@ -175,6 +205,9 @@ def main():
         for method in ("account", "group"):
             pred = fg[f"pred_{method}"].to_numpy()
             caught = fg["label"].to_numpy() == 1
+            confusion.append(pd.DataFrame({"true_pattern": fg["true"].to_numpy(), "predicted_pattern": pred})
+                             .fillna("none").value_counts().rename("n").reset_index()
+                             .assign(dataset=d, method=method))
             for mode, t in [("end_to_end", class_table(fg["true"].to_numpy(), pred, classes, total_true)),
                             ("caught", class_table(fg["true"].to_numpy()[caught], pred[caught], classes))]:
                 t["dataset"], t["method"], t["mode"] = d, method, mode
@@ -190,7 +223,9 @@ def main():
 
     out = pd.concat(tables, ignore_index=True)
     out["stage1_config"], out["run_at"] = a.stage1, S.RUN_AT
+    out["settings_json"] = json.dumps(settings)
     S.write_results(out, "group_stage2", out_cfg)
+    S.write_results(pd.concat(confusion, ignore_index=True), "group_stage2_confusion", out_cfg)
     imp = pd.Series(model.feature_importances_, index=feat + gcols).sort_values(ascending=False)
     print("\n[group namer] top features:", ", ".join(imp.head(12).index))
     print(f"Saved analytics/group_stage2 under config={out_cfg} ({time.time() - t0:.0f}s)")
