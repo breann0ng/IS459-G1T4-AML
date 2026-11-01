@@ -14,8 +14,14 @@ Frozen setup (chosen on HI-Small + HI-Medium validation, never on HI-Large)
 Writes  models/final/stage1.txt, models/final/namer_group.txt, models/final/meta.json
 Next    spark-submit [confs] score_final_spark.py HI-Large        (scores every payment)
         python3 final_group_namer.py HI-Large                      (names the alerts)
+
+BQ2 "new tactic" model (blind to some patterns), stage 1 only, saved to its own folder:
+    python3 final_train.py txn_v3m_nofan --exclude-patterns fan_in,fan_out --model-dir models/final_nofan --stage1-only
+    (txn_v3m_nofan = a train_txn.py validation run with the same --exclude-patterns, which sets
+     its own threshold on validation data without those patterns)
 """
 
+import argparse
 import json
 import sys
 import math
@@ -30,10 +36,17 @@ import train_txn as T
 import group_stage2 as G
 import scheme_stage2 as S
 
-VALIDATED_RUN = sys.argv[1] if len(sys.argv) > 1 else "txn_v3m"
+_ap = argparse.ArgumentParser()
+_ap.add_argument("validated_run", nargs="?", default="txn_v3m")
+_ap.add_argument("--exclude-patterns", default="", help="drop these patterns' laundering from training")
+_ap.add_argument("--model-dir", default="models/final", help="S3 folder under the bucket")
+_ap.add_argument("--stage1-only", action="store_true", help="skip the stage 2 group namer")
+ARGS = _ap.parse_args()
+VALIDATED_RUN = ARGS.validated_run
+EXCLUDE = [x for x in ARGS.exclude_patterns.split(",") if x]
 TXN_TABLE, ACCT_TABLE = "txn_features_v3", "features_v3"
 MERGE = {"bipartite": "layering", "stack": "layering"}
-MODEL_DIR = f"{T.ROOT}/models/final"
+MODEL_DIR = f"{T.ROOT}/{ARGS.model_dir.strip('/')}"
 
 
 def put_text(path, text):
@@ -54,8 +67,12 @@ def main():
 
     # ---- stage 1: payment model (same data, features, settings and seed as the validated run)
     sd = T.open_dataset(f"{T.CURATED}/{TXN_TABLE}_sample")
-    keep = [c for c in sd.schema.names if c not in ("txn_id", "s_id", "r_id", "week", "pattern_label")]
+    keep = [c for c in sd.schema.names if c not in ("txn_id", "s_id", "r_id", "week")]
     smp = sd.to_table(columns=keep, filter=ds.field("dataset").isin(T.TRAIN_DATASETS)).to_pandas()
+    if EXCLUDE:
+        n0 = len(smp)
+        smp = smp[~smp["pattern_label"].isin(EXCLUDE)].reset_index(drop=True)
+        print(f"[final] excluded {EXCLUDE}: dropped {n0 - len(smp)} laundering payments from training")
     smp["date"] = pd.to_datetime(smp["date"]).dt.date
     feat = [c for c in smp.columns if c not in T.META]
     m = np.zeros(len(smp), dtype=bool)
@@ -70,6 +87,14 @@ def main():
     put_text(f"{MODEL_DIR}/stage1.txt", stage1.booster_.model_to_string())
     print(f"[final] stage 1 trained on {len(tr)} payments ({n_pos} laundering), {len(feat)} features")
     del smp, tr
+    if ARGS.stage1_only:
+        meta = {"validated_run": VALIDATED_RUN, "threshold": thr,
+                "train_end": {k: str(v) for k, v in train_end.items()},
+                "txn_table": TXN_TABLE, "acct_table": ACCT_TABLE, "stage1_features": feat,
+                "stage1_params": dict(params), "excluded_patterns": EXCLUDE, "trained_at": T.RUN_AT}
+        put_text(f"{MODEL_DIR}/meta.json", json.dumps(meta, indent=1, default=str))
+        print(f"[final] saved {MODEL_DIR} (stage1.txt, meta.json; stage 1 only) in {time.time() - t0:.0f}s")
+        return
 
     # ---- stage 2: group namer (same recipe as group_stage2.py)
     a = S.open_dataset(f"{S.CURATED}/{ACCT_TABLE}_sample").to_table(
@@ -97,9 +122,9 @@ def main():
             "namer_features": f2 + gcols, "namer_account_features": f2, "namer_group_features": gcols,
             "namer_classes": [str(c) for c in namer.classes_], "merge": MERGE,
             "keep_rates": G.KEEP_RATES, "hub_degree": G.HUB_DEGREE,
-            "max_linked_days": G.MAX_LINKED_DAYS, "trained_at": T.RUN_AT}
+            "max_linked_days": G.MAX_LINKED_DAYS, "excluded_patterns": EXCLUDE, "trained_at": T.RUN_AT}
     put_text(f"{MODEL_DIR}/meta.json", json.dumps(meta, indent=1, default=str))
-    print(f"[final] saved models/final/ (stage1.txt, namer_group.txt, meta.json) in {time.time() - t0:.0f}s")
+    print(f"[final] saved {MODEL_DIR} (stage1.txt, namer_group.txt, meta.json) in {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

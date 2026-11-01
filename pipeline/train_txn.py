@@ -233,6 +233,10 @@ def main():
                     help="account-day feature table for the pattern namer (default features_v2)")
     ap.add_argument("--merge-layering", action="store_true", help="stage 2: bipartite + stack -> layering")
     ap.add_argument("--no-stage2", action="store_true", help="skip the end-to-end stage 2")
+    ap.add_argument("--exclude-patterns", default="",
+                    help="BQ2 'new tactic' test: leave the laundering of these patterns OUT of training "
+                         "and validation (e.g. fan_in,fan_out), as if the model had never seen them. "
+                         "They are dropped, not relabelled as normal.")
     ap.add_argument("--new-groups", default="x,o,t",
                     help="v3 feature groups to use: x = unusual for this account, o = owner, "
                          "t = new payment features; e.g. --new-groups x (default all)")
@@ -242,8 +246,13 @@ def main():
     PARAMS.update({k: value(v) for k, v in (p.split("=", 1) for p in a.param)})
 
     sample_ds = open_dataset(f"{CURATED}/{a.txn_table}_sample")
-    keep = [c for c in sample_ds.schema.names if c not in ("txn_id", "s_id", "r_id", "week", "pattern_label")]
+    excl = [x for x in a.exclude_patterns.split(",") if x]
+    keep = [c for c in sample_ds.schema.names if c not in ("txn_id", "s_id", "r_id", "week")]
     sample = sample_ds.to_table(columns=keep, filter=ds.field("dataset").isin(TRAIN_DATASETS)).to_pandas()
+    if excl:
+        n0 = len(sample)
+        sample = sample[~sample["pattern_label"].isin(excl)].reset_index(drop=True)
+        print(f"[train] --exclude-patterns {excl}: dropped {n0 - len(sample)} laundering payments")
     sample["date"] = pd.to_datetime(sample["date"]).dt.date
     feat = [c for c in sample.columns if c not in META]
     if a.drop_account_features:
@@ -290,6 +299,10 @@ def main():
                 continue
             p = b.to_pandas()
             del b
+            if excl:
+                p = p[~p["pattern_label"].isin(excl)]
+                if p.empty:
+                    continue
             parts["s"].append(model.predict_proba(p[feat].to_numpy(np.float32))[:, 1].astype(np.float32))
             parts["y"].append(p["label"].to_numpy(bool))
             parts["date"].append(pd.to_datetime(p["date"]).to_numpy("datetime64[D]"))
@@ -334,6 +347,7 @@ def main():
     res["params_json"], res["n_features"], res["run_at"] = json.dumps(PARAMS), len(feat), RUN_AT
     res["txn_table"], res["stage2_features"] = a.txn_table, a.stage2_features
     res["new_groups"] = ",".join(sorted(a.groups))
+    res["excluded_patterns"] = ",".join(excl)
     res["train_end_dates"] = json.dumps({k: str(v) for k, v in train_end.items()})
     write_results(res, "txn_results")
 
