@@ -70,7 +70,7 @@ def main():
 
     dr = pd.DataFrame(d["drift"])
     print("\n=== early warning (no labels)")
-    print(dr[["scenario", "model", "week", "alerts_per_day", "alerts_z", "score_psi", "feature_psi_max",
+    print(dr[["scenario", "model", "week", "alerts_per_day", "alerts_z", "score_psi", "tail_psi", "feature_psi_max",
               "feature_psi_top"]].round(3).to_string(index=False))
 
     al = pd.DataFrame(d["alarms"])

@@ -28,7 +28,8 @@ What is measured, per week (Monday-Sunday weeks, the pipeline's week numbers)
     Alarm: a recall below the baseline's mean - 2 sd for 2 weeks in a row. It is only KNOWN
     LABEL_DELAY weeks later, because labels arrive late.
   Early warning (no labels needed, known the same week)
-    alerts per day vs baseline (z-score), score distribution PSI, feature PSI (top features).
+    alerts per day vs baseline (z-score), score distribution PSI (all account-days, and the
+    "high-risk tail" = each day's top TAIL_RANK), feature PSI (top features).
     Lead time = week the label-based alarm is known - week of the first early warning.
 
 Writes  analytics/bq2_tactics, bq2_tactics_shift, bq2_scorecard, bq2_scheme_card, bq2_drift,
@@ -58,14 +59,19 @@ HIDE = [x for x in os.environ.get("BQ2_HIDE", "fan_in,fan_out").split(",") if x]
 BASELINE_WEEKS = int(os.environ.get("BQ2_BASELINE_WEEKS", "3"))
 INTRO_WEEK = os.environ.get("BQ2_INTRO_WEEK")          # default: the 5th monitored week
 LABEL_DELAY = int(os.environ.get("BQ2_LABEL_DELAY", "2"))
+# Top stage 1 features (validation gain), WITHOUT the "age" features (r_/s_age_days, t_pair_age_d):
+# those count days since the account / pair was first seen in the data READ, which restarts with every
+# 2-week chunk (21 days of history), so they move every week by construction, not because behaviour changed.
 DRIFT_FEATURES = os.environ.get("BQ2_DRIFT_FEATURES",
-    "t_fmt_ach,t_pair_age_d,r_age_days,s_n_cross_ccy,t_pair_n_7d,t_amt_rel,r_x_trend,s_age_days,"
-    "r_x_new_cp_in,t_fmt_credit_card,s_n_out,r_cycles_today,s_cycles_today,s_cycles_7d,"
-    "s_out_cp_max_senders").split(",")
+    "t_fmt_ach,s_n_cross_ccy,t_pair_n_7d,t_amt_rel,r_x_trend,r_x_new_cp_in,t_fmt_credit_card,s_n_out,"
+    "r_cycles_today,s_cycles_today,s_cycles_7d,s_out_cp_max_senders,t_log_amt,t_hour,t_cross_ccy,"
+    "t_same_bank").split(",")
 DRIFT_SAMPLE = float(os.environ.get("BQ2_DRIFT_SAMPLE", "0.1"))   # share of payments used for feature drift
 PATTERNS = ["fan_in", "fan_out", "gather_scatter", "scatter_gather", "cycle", "bipartite", "stack", "random"]
 TOP_K = 1000
+TAIL_RANK = int(os.environ.get("BQ2_TAIL_RANK", "2000"))   # "high-risk tail": each day's top N account-days
 PSI_MODERATE, PSI_LARGE = 0.1, 0.2
+P_SIG = 0.01                       # chi-square significance needed before a PSI shift counts
 CURATED, ANALYTICS = f"{ROOT}/curated", f"{ROOT}/analytics"
 
 spark = SparkSession.builder.appName(f"BQ2Analysis-{DATASET}").getOrCreate()
@@ -129,6 +135,14 @@ def chi2_p(cur, base):
     if t.shape[1] < 2 or (t.sum(axis=1) == 0).any():
         return None
     return float(chi2_contingency(t)[1])
+
+
+def significant(psi_v, p_v, level):
+    """A shift counts only if it is big (PSI >= level) AND not chance (chi-square p < P_SIG). Small weekly
+    counts make PSI noisy; the test stops a handful of schemes from raising an alarm."""
+    if psi_v is None or (isinstance(psi_v, float) and math.isnan(psi_v)) or psi_v < level:
+        return False
+    return p_v is None or (isinstance(p_v, float) and math.isnan(p_v)) or p_v < P_SIG
 
 
 def first_run(weeks, flags, n=2):
@@ -331,24 +345,37 @@ def main():
     for scen in ("real", "new_tactic"):
         H = hist if scen == "real" else hist[~hidden_pre_intro(hist)]
         FH = fh if scen == "real" else fh[~((fh["week"] < intro) & fh["hidden"])]
-        fpsi = {}
+        fpsi, fp = {}, {}
         for f, g in FH.groupby("feature"):
             t = g.groupby(["week", "bin"])["n"].sum().unstack(fill_value=0)
             b = t.loc[[w for w in base_weeks if w in t.index]].sum()
             for w in t.index:
                 fpsi.setdefault(int(w), {})[f] = psi(t.loc[w].to_numpy(), b.to_numpy())
+                fp.setdefault(int(w), {})[f] = chi2_p(t.loc[w].to_numpy(), b.to_numpy())
         for m in names:
             t = H[H["model"] == m].groupby(["week", "bin"])["n"].sum().unstack(fill_value=0)
             b = t.loc[[w for w in base_weeks if w in t.index]].sum()
             o = overall[(overall["scenario"] == scen) & (overall["model"] == m)].set_index("week")
+            # high-risk tail: score distribution of each day's top TAIL_RANK account-days (no labels)
+            A = ad if scen == "real" else ad[~hidden_pre_intro(ad)]
+            tl = A[A[f"rank_{m}"] <= TAIL_RANK]
+            tb = np.floor(np.log10(tl[f"score_{m}"].clip(lower=1e-7)) * 4).astype(int)
+            tt = tl.assign(bin=tb).groupby(["week", "bin"]).size().unstack(fill_value=0)
+            tbase = tt.loc[[w for w in base_weeks if w in tt.index]].sum()
             apd = o["alerts_per_day"]
             mu, sd = apd.loc[base_weeks].mean(), apd.loc[base_weeks].std(ddof=1)
             sd = max(sd if sd == sd else 0.0, 0.05 * mu, 1.0)
             for w in weeks:
                 fp_w = fpsi.get(w, {})
-                top_f = max(fp_w, key=lambda k: fp_w[k] or 0) if fp_w else None
+                sig = {k: v for k, v in fp_w.items() if significant(v, fp.get(w, {}).get(k), 0)}
+                top_f = (max(sig, key=lambda k: sig[k] or 0) if sig else
+                         max(fp_w, key=lambda k: fp_w[k] or 0) if fp_w else None)
                 drift_rows.append({"scenario": scen, "model": m, "week": w,
                                    "score_psi": psi(t.loc[w].to_numpy(), b.to_numpy()) if w in t.index else None,
+                                   "score_p": chi2_p(t.loc[w].to_numpy(), b.to_numpy()) if w in t.index else None,
+                                   "tail_psi": psi(tt.loc[w].to_numpy(), tbase.to_numpy()) if w in tt.index else None,
+                                   "tail_p": chi2_p(tt.loc[w].to_numpy(), tbase.to_numpy()) if w in tt.index else None,
+                                   "feature_p": fp.get(w, {}).get(top_f) if top_f else None,
                                    "alerts_per_day": float(apd.get(w, np.nan)),
                                    "alerts_z": float((apd.get(w, np.nan) - mu) / sd),
                                    "feature_psi_max": fp_w.get(top_f) if top_f else None,
@@ -364,12 +391,12 @@ def main():
         # BQ2a: did the tactics shift? (labels / answer key, so also known LABEL_DELAY weeks late)
         for dim in dims:
             s = shift[(shift["scenario"] == scen) & (shift["dimension"] == dim)].set_index("week")
-            flags = [(s["psi"].get(w) or 0) >= PSI_LARGE for w in post]
+            flags = [significant(s["psi"].get(w), s["chi2_p"].get(w), PSI_LARGE) for w in post]
             w_al = first_run(post, flags)
             alarm_rows.append({"scenario": scen, "model": None, "kind": "tactic shift", "signal": f"mix by {dim}",
                                "alarm_week": w_al, "known_week": w_al + LABEL_DELAY if w_al else None,
-                               "detail": f"PSI >= {PSI_LARGE} two weeks in a row; max PSI "
-                                         f"{s['psi'].reindex(post).max():.3f}" if len(s) else ""})
+                               "detail": f"PSI >= {PSI_LARGE} and chi-square p < {P_SIG}, two weeks in a row; "
+                                         f"max PSI {s['psi'].reindex(post).max():.3f}" if len(s) else ""})
         for m in names:
             c = card[(card["scenario"] == scen) & (card["model"] == m)]
             ref = c[(c["group"] == "all laundering") & c["week"].isin(base_weeks)]["recall"].dropna()
@@ -395,10 +422,12 @@ def main():
             d = drift[(drift["scenario"] == scen) & (drift["model"] == m)].set_index("week")
             for sig, flags, how in [
                 ("alerts per day", [abs(d["alerts_z"].get(w, 0) or 0) >= 3 for w in post], "|z| >= 3 vs baseline"),
-                ("score distribution", [(d["score_psi"].get(w) or 0) >= PSI_MODERATE for w in post],
-                 f"PSI >= {PSI_MODERATE}"),
-                ("feature distribution", [(d["feature_psi_max"].get(w) or 0) >= PSI_LARGE for w in post],
-                 f"any top feature PSI >= {PSI_LARGE}")]:
+                ("score distribution", [significant(d["score_psi"].get(w), d["score_p"].get(w), PSI_MODERATE)
+                                        for w in post], f"PSI >= {PSI_MODERATE} and chi-square p < {P_SIG}"),
+                ("high-risk tail scores", [significant(d["tail_psi"].get(w), d["tail_p"].get(w), PSI_MODERATE)
+                                           for w in post], f"top {TAIL_RANK}/day: PSI >= {PSI_MODERATE} and p < {P_SIG}"),
+                ("feature distribution", [significant(d["feature_psi_max"].get(w), d["feature_p"].get(w), PSI_LARGE)
+                                          for w in post], f"a top feature with PSI >= {PSI_LARGE} and p < {P_SIG}")]:
                 w_al = next((w for w, f in zip(post, flags) if f), None)
                 alarm_rows.append({"scenario": scen, "model": m, "kind": "early warning", "signal": sig,
                                    "alarm_week": w_al, "known_week": w_al, "detail": how})

@@ -16,7 +16,7 @@
    - **BQ2b, is detection falling behind?** Each week's precision, recall (overall, the new tactic, other patterns, unclassified), alerts per day, and schemes alerted before they finish.
      - **Alarm:** recall below the baseline's mean − 2 sd, two weeks in a row.
      - Labels arrive **2 weeks late** in a real bank, so the alarm is only *known* 2 weeks later.
-   - **Early warning, no labels:** alerts per day (z-score), shift in risk scores (PSI) and shift in the top features (PSI), all known the same week.
+   - **Early warning, no labels:** alerts per day (z-score), shift in the scores of the day's top 2,000 accounts (the "high-risk tail", PSI), shift in all risk scores (PSI) and shift in the top features (PSI), all known the same week. A shift only counts if it is also statistically significant (chi-square p < 0.01), so a few odd schemes in a quiet week can't raise an alarm.
    - **Lead time** = the week the label alarm is known − the week of the first early warning.
 5. **Outputs:** `analytics/bq2/HI-Large.json`, which `bq2_report.py` prints and the Streamlit page `app/app_bq2.py` shows.
 
@@ -122,3 +122,14 @@ To try another new tactic (e.g. cycles), run `validate_nofan` and `final_train_n
 - **Synthetic data.** IBM's simulator may barely change tactics over 3 months, so the **controlled test** is what shows the monitor works. The **real** scenario honestly reports whether tactics shifted.
 - **The new tactic is simulated in the evaluation.** Fan-in / fan-out payments still exist in the data before week 9. They're only removed from grading and from the label-free signals. The features of *other* accounts that traded with them are unchanged.
 - **Scoring is end of day**, as in BQ1. Hours-to-alert assume the list is published after the day closes.
+- **The "age" features are left out of the drift monitor.** `r_age_days`, `s_age_days` and `t_pair_age_d` count days since an account or pair was first seen *in the data read*. That restarts with every 2-week chunk (21 days of history) and differs between training (HI-Small / HI-Medium read whole, at most 10–16 days) and HI-Large (up to 34 days). In the local test they moved strongly every week by construction. Worth flagging for BQ1 too: they're top-10 features, so the model sees ages on HI-Large that it never saw in training.
+- **Whole-population signals are weak against a small new tactic.** Laundering is a tiny share of all payments, so whole-score and feature drift barely move; the high-risk-tail and alerts-per-day signals are the ones to watch. In the local test (synthetic data) they moved after the new tactic appeared but stayed under the alarm lines. The HI-Large run gives the real answer.
+
+## Local test (synthetic data, before the AWS run)
+
+The whole run (team pipeline + BQ2) was run end to end on synthetic HI-Small / HI-Medium / HI-Large data (Spark local, Java 17), with all 8 patterns, unclassified laundering, and a built-in tactic change from week 10 (more cycles, more Bitcoin).
+- Every step ran.
+- The blind model dropped the fan-in / fan-out payments from training and validation and set its own threshold.
+- **BQ2a** flagged the payment-format shift two weeks after it started.
+- **BQ2b:** in the controlled test, the blind model's recall on the new tactic fell to 7–37% in weeks 9–11, while the current model stayed higher. The monitor raised "falling behind" for the blind model only.
+- The numbers themselves are not results (fake data).

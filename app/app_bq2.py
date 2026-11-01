@@ -173,10 +173,11 @@ st.caption(f"Labels (what really was laundering) arrive about {delay} weeks late
            "These signals need no labels and are known the same week.")
 dr = with_label(f["drift"][f["drift"]["scenario"] == scen].copy())
 dr["Model"] = dr["model"].map(lambda m: MODEL_NAME.get(m, m))
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 for col, y, title, rule in [(c1, "alerts_z", "Alerts per day vs normal (z-score)", 3),
-                            (c2, "score_psi", "Shift in risk scores (PSI)", d["psi_levels"][0]),
-                            (c3, "feature_psi_max", "Biggest shift in a top feature (PSI)", d["psi_levels"][1])]:
+                            (c2, "tail_psi", "Shift in the highest-risk accounts' scores (PSI)", d["psi_levels"][0]),
+                            (c3, "score_psi", "Shift in all risk scores (PSI)", d["psi_levels"][0]),
+                            (c4, "feature_psi_max", "Biggest shift in a top feature (PSI)", d["psi_levels"][1])]:
     ch = alt.Chart(dr).mark_line(point=True).encode(
         x=alt.X("Week:N", sort=order, title=None), y=alt.Y(f"{y}:Q", title=None),
         color=alt.Color("Model:N", scale=alt.Scale(range=[BLUE, RED]), legend=None),
