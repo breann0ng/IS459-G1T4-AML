@@ -64,9 +64,14 @@ def group_report(cfg):
         for m, s in (("account", a), ("group", b)):
             t[f"{m}_P"], t[f"{m}_R"], t[f"{m}_F1"] = s["precision"], s["recall"], s["f1"]
         t["change_F1"] = t["group_F1"] - t["account_F1"]
+        for m in ("logreg", "rules"):                  # baselines, only with --baselines
+            if (e["method"] == m).any():
+                t[f"{m}_F1"] = e[e["method"] == m].set_index("pattern")["f1"]
         c = x[x["mode"] == "caught"].pivot_table(index="pattern", columns="method", values="f1")
         t["caught_account_F1"], t["caught_group_F1"] = c.get("account"), c.get("group")
         order = [p for p in t.index if not p.startswith("MACRO")] + [p for p in t.index if p.startswith("MACRO")]
+        if "max_linked_days" in x and x["max_linked_days"].notna().any():
+            print(f"   LINK_DAYS={int(x['link_days'].iloc[0])} MAX_LINKED_DAYS={int(x['max_linked_days'].iloc[0])}")
         print(f"-- {dname} · END TO END (account = today's namer, group = + group shape)")
         print(t.loc[order].round(3).to_string())
 

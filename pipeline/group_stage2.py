@@ -5,6 +5,8 @@ Round 3, step 3: name the pattern from the GROUP's shape, fixed version of Task 
 Plain Python on the EMR primary node (needs scheme_stage2.py in the same folder):
     pip3 install --user pandas pyarrow scikit-learn lightgbm networkx
     python3 group_stage2.py txn_v3m                 stage 1 + namer = that train_txn.py run
+    python3 group_stage2.py txn_v3m --max-linked-days 10 --baselines --out-config txn_v3m_mld10_grp
+                                                    longer cross-day linking + baseline namers
 
 What changed from Task C (scheme_stage2.py)
     1. Groups are built from the PAYMENT model's alerts (txn_alerts of the given run), which
@@ -19,6 +21,12 @@ What changed from Task C (scheme_stage2.py)
     Compared on the same alerts:
         account   the run's own namer (predicted_pattern in txn_alerts): today's stage 2
         group     account-day features + 35 group-shape / role features
+      with --baselines, also
+        logreg    logistic regression on the same features as "group" (a linear floor)
+        rules     no model: shape_rules.classify on the payments inside each group
+
+--link-days / --max-linked-days change the cross-day linking (defaults = the frozen pipeline;
+analysis/typology_attribution.ipynb §13 suggests a longer MAX_LINKED_DAYS keeps more schemes whole).
 
 Reads   analytics/txn_alerts, analytics/txn_results (the run), curated/<features>(_sample),
         curated/transactions (only payments between the accounts involved)
@@ -35,8 +43,13 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 import networkx as nx
 from collections import defaultdict
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_sample_weight
 
 import scheme_stage2 as S
+import shape_rules as R
 
 KEEP_RATES = [1.0, 0.7, 0.5]     # training copies: whole schemes, and two fragment levels
 HUB_DEGREE = 30                  # accounts linked to more counterparties than this don't join groups
@@ -87,6 +100,28 @@ def with_groups(rows, payments_by_ds, label=""):
     return pd.concat(parts)
 
 
+def linear_X(X):
+    """Logistic regression cannot take inf; the trees never minded."""
+    return np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def fit_logreg(X, y):
+    """Baseline: same features and class weights as the LightGBM namer, linear model."""
+    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000))
+    model.fit(linear_X(X), y, logisticregression__sample_weight=compute_sample_weight("balanced", y))
+    return model
+
+
+def rule_names(rows, payments, merge):
+    """Baseline: name each row's group with shape_rules (groups rebuilt as in with_groups)."""
+    r = rows.assign(k=S.key(rows["acct_bank"], rows["acct"]))
+    gid, edges, _ = build_groups(r, payments)
+    e_gid = [gid[(s, d)] for s, d in zip(edges["src"], edges["date"])]
+    names = {g: R.name_group(e["src"].to_numpy(), e["dst"].to_numpy(), merge)
+             for g, e in edges.assign(_gid=e_gid).groupby("_gid")}
+    return np.array([names.get(gid[(k, d)], "unclassified") for k, d in zip(r["k"], r["date"])])
+
+
 def class_table(true, pred, classes, total_true=None):
     rows = []
     for c in classes:
@@ -106,13 +141,26 @@ def class_table(true, pred, classes, total_true=None):
 
 
 def main():
+    global MAX_LINKED_DAYS
     ap = argparse.ArgumentParser(description="Group-level stage 2, end to end")
     ap.add_argument("stage1", help="config of a train_txn.py run, e.g. txn_v3m")
     ap.add_argument("--features", default="features_v3", help="account-day table (namer features)")
-    ap.add_argument("--out-config", help="name to save under (default <stage1>_grp)")
+    ap.add_argument("--out-config", help="name to save under (default <stage1>_grp); end it in _grp "
+                                         "so txn_report.py shows it")
+    ap.add_argument("--link-days", type=int, default=S.LINK_DAYS,
+                    help=f"same account on days this close = same group (default {S.LINK_DAYS})")
+    ap.add_argument("--max-linked-days", type=int, default=MAX_LINKED_DAYS,
+                    help=f"link an account across days only if it has this few suspicious days "
+                         f"(default {MAX_LINKED_DAYS})")
+    ap.add_argument("--baselines", action="store_true",
+                    help="also grade a logistic regression namer and the shape rules (shape_rules.py)")
     a = ap.parse_args()
+    S.LINK_DAYS, MAX_LINKED_DAYS = a.link_days, a.max_linked_days
+    methods = ["account", "group"] + (["logreg", "rules"] if a.baselines else [])
     out_cfg = a.out_config or f"{a.stage1}_grp"
     t0 = time.time()
+    print(f"[groups] LINK_DAYS={S.LINK_DAYS} MAX_LINKED_DAYS={MAX_LINKED_DAYS} HUB_DEGREE={HUB_DEGREE}; "
+          f"methods {methods}")
 
     res = S.load_table("txn_results", ds.field("config") == a.stage1)
     if res.empty:
@@ -144,6 +192,9 @@ def main():
     model = S.fit(train[feat + gcols].fillna(0.0).to_numpy(np.float32), y)
     print(f"[train] group namer on {len(train)} rows ({len(feat)} account-day + {len(gcols)} group "
           f"features), {time.time() - t0:.0f}s")
+    if a.baselines:
+        logreg = fit_logreg(train[feat + gcols].fillna(0.0).to_numpy(np.float32), y)
+        print(f"[train] logistic regression baseline, {time.time() - t0:.0f}s")
 
     # ---- validation rows: the alerts (to name) + all true laundering (recall denominators)
     full = S.open_dataset(f"{S.CURATED}/{a.features}")
@@ -166,13 +217,17 @@ def main():
         flagged = g[g["flagged"]].copy()
         pays_v = S.payments_for(flagged)
         fg = with_groups(flagged, pays_v, "alerts")
-        fg["pred_group"] = model.predict(fg[feat + gcols].fillna(0.0).to_numpy(np.float32))
+        X = fg[feat + gcols].fillna(0.0).to_numpy(np.float32)
+        fg["pred_group"] = model.predict(X)
+        if a.baselines:
+            fg["pred_logreg"] = logreg.predict(linear_X(X))
+            fg["pred_rules"] = rule_names(fg, pays_v[d], merge)
         acc = al.set_index(["acct_bank", "acct", "date"])["predicted_pattern"]
         fg["pred_account"] = acc.reindex(pd.MultiIndex.from_arrays(
             [fg["acct_bank"].astype(al["acct_bank"].dtype), fg["acct"], fg["date"]])).to_numpy()
         print(f"[score] {d}: {len(al)} alerts, {len(fg)} matched, {int((fg['label'] == 1).sum())} truly laundering, "
               f"{len(g[g['label'] == 1])} true laundering account-days in total")
-        for method in ("account", "group"):
+        for method in methods:
             pred = fg[f"pred_{method}"].to_numpy()
             caught = fg["label"].to_numpy() == 1
             for mode, t in [("end_to_end", class_table(fg["true"].to_numpy(), pred, classes, total_true)),
@@ -185,11 +240,15 @@ def main():
         show["account_P"], show["account_R"], show["account_F1"] = e_acc["precision"], e_acc["recall"], e_acc["f1"]
         show["group_P"], show["group_R"], show["group_F1"] = e_grp["precision"].to_numpy(), e_grp["recall"].to_numpy(), e_grp["f1"].to_numpy()
         show["change_F1"] = show["group_F1"] - show["account_F1"]
+        for m in methods[2:]:
+            e_m = [t for t in tables if (t["dataset"].iloc[0], t["method"].iloc[0], t["mode"].iloc[0]) == (d, m, "end_to_end")][0]
+            show[f"{m}_F1"] = e_m["f1"].to_numpy()
         print(f"-- {d} validation · END TO END (account = today's namer, group = + group shape)")
         print(show.round(3).to_string(index=False))
 
     out = pd.concat(tables, ignore_index=True)
     out["stage1_config"], out["run_at"] = a.stage1, S.RUN_AT
+    out["link_days"], out["max_linked_days"] = S.LINK_DAYS, MAX_LINKED_DAYS
     S.write_results(out, "group_stage2", out_cfg)
     imp = pd.Series(model.feature_importances_, index=feat + gcols).sort_values(ascending=False)
     print("\n[group namer] top features:", ", ".join(imp.head(12).index))
