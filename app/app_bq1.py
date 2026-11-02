@@ -25,9 +25,8 @@ d, s1 = load()
 ad = s1[s1["level"] == "account_day"]
 frozen = ad[ad["cutoff"] == "frozen_threshold"].iloc[0]
 tot = d["schemes_total"]
-hist = pd.DataFrame(d["scheme_hours_hist"])
 caught_n = round(tot["schemes"] * tot["caught"])
-within_1h = int(hist["schemes"].iloc[0])
+running_n = round(tot["schemes"] * tot["alert_before_end_eod"])
 
 # ------------------------------------------------------------------ header
 st.title("Catching laundering early, with alerts analysts can handle")
@@ -41,14 +40,17 @@ st.caption(
     f"{frozen['payments'] / 1e6:.1f}M payments · trained on HI-Small and HI-Medium only"
 )
 
-k1, k2, k3, k4 = st.columns(4)
+k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Alerts that are real laundering", f"{frozen['precision']:.0%}",
           help="Precision: of the accounts flagged each day, how many were really laundering.")
-k2.metric("Laundering schemes flagged", f"{tot['caught']:.0%}",
-          help=f"{caught_n:,} of {tot['schemes']:,} schemes that started in the test window.")
-k3.metric("Median time to first flag", f"{tot['median_hours_to_first_flag']:.0f} h",
-          help="From a scheme's first payment to the first payment the model flags.")
-k4.metric("Alerts per day", f"{frozen['alerts_per_day']:,.0f}",
+k2.metric("Laundering caught", f"{frozen['recall']:.0%}",
+          help="Recall: share of laundering account-days that get an alert, including laundering with no known pattern.")
+k3.metric("Laundering schemes flagged", f"{tot['caught']:.0%}",
+          help=f"{caught_n:,} of {tot['schemes']:,} schemes that started in the test window. A scheme counts once "
+               "any one of its payments is flagged, so this is higher than laundering caught.")
+k4.metric("Schemes still running at alert", f"{tot['alert_before_end_eod']:.0%}",
+          help=f"{running_n:,} of {tot['schemes']:,} schemes got their end-of-day alert before their last payment.")
+k5.metric("Alerts per day", f"{frozen['alerts_per_day']:,.0f}",
           help="Accounts flagged per day at the model's threshold; steady day to day.")
 
 st.divider()
@@ -88,36 +90,38 @@ with right:
 st.divider()
 
 # ------------------------------------------------------------------ 2. early
-st.subheader("2 · Most schemes are flagged within an hour of starting")
+st.subheader("2 · About half of schemes are still running when the alert arrives")
+st.caption("The model reads each account's whole day, so alerts are ready when the day closes, not as payments arrive.")
 c1, c2 = st.columns([1, 2], gap="large")
 with c1:
-    st.metric("Flagged within 1 hour", f"{within_1h / caught_n:.0%}", help="Of flagged schemes.")
-    st.metric("Scheme payments still to come at first flag", f"{tot['share_from_first_flag']:.0%}",
-              help="On average, the share of a scheme's payments made at or after its first flag: "
-                   "what acting on the alert could still stop.")
-    st.info(f"Only {tot['alert_before_end_eod']:.0%} of schemes are still running when a once-a-day batch "
-            "alert arrives. Score payments as they arrive to keep the early lead.")
+    st.metric("Schemes still running at alert", f"{tot['alert_before_end_eod']:.0%}",
+              help=f"{running_n:,} of {tot['schemes']:,} schemes. The rest finished first or were never flagged.")
+    st.metric("Median scheme length", f"{tot['median_duration_h']:.0f} h",
+              help="From a scheme's first payment to its last.")
+    st.info("Schemes that finish before the day closes are over by the time the alert arrives. "
+            "Catching them needs a model that scores only the payments seen so far.")
 with c2:
-    names = {"(-0.01, 1.0]": "≤1 h", "(1.0, 3.0]": "1–3 h", "(3.0, 6.0]": "3–6 h", "(6.0, 12.0]": "6–12 h",
-             "(12.0, 24.0]": "12–24 h", "(24.0, 48.0]": "1–2 days", "(48.0, 96.0]": "2–4 days"}
-    h = hist.assign(when=hist["bucket"].map(names), first=lambda t: t.index == 0)
-    bars = alt.Chart(h).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3, size=38).encode(
-        x=alt.X("when:N", sort=list(names.values()), title="Time from scheme start to first flag",
-                axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("schemes:Q", title="Schemes"),
-        color=alt.condition("datum.first", alt.value(BLUE), alt.value(GREY)),
-        tooltip=[alt.Tooltip("when:N", title="First flag"), alt.Tooltip("schemes:Q", format=",")])
-    labels = bars.mark_text(dy=-8, color=INK).encode(text=alt.Text("schemes:Q", format=","))
+    sp = pd.DataFrame(d["schemes_by_pattern"])
+    sp["pattern"] = sp["pattern_type"].str.replace("_", " ").str.capitalize()
+    bars = alt.Chart(sp).mark_bar(cornerRadiusEnd=3, size=22, color=BLUE).encode(
+        y=alt.Y("pattern:N", sort="-x", title=None),
+        x=alt.X("alert_before_end_eod:Q", title="Alerted schemes still running at the end-of-day alert",
+                axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
+        tooltip=["pattern:N", alt.Tooltip("alert_before_end_eod:Q", title="Still running", format=".1%"),
+                 alt.Tooltip("median_duration_h:Q", title="Median length (h)", format=".1f")])
+    labels = bars.mark_text(align="left", dx=4, color=INK).encode(text=alt.Text("alert_before_end_eod:Q", format=".0%"))
     st.altair_chart((bars + labels).properties(height=300), width="stretch")
 
 st.divider()
 
 # ------------------------------------------------------------------ 3. where it misses
-st.subheader("3 · Every known pattern is caught; laundering with no pattern is not")
 p = pd.DataFrame(d["patterns"])
 p = p[p["level"] == "account_day"].copy()
 p["pattern"] = p["pattern_label"].str.replace("_", " ").str.capitalize()
 p["weak"] = p["pattern_label"] == "unclassified"
+known = p.loc[~p["weak"], "recall"]
+st.subheader(f"3 · Known patterns are caught {known.min():.0%}–{known.max():.0%} of the time; "
+             "laundering with no pattern is mostly missed")
 pb = alt.Chart(p).mark_bar(cornerRadiusEnd=3, size=22).encode(
     y=alt.Y("pattern:N", sort="-x", title=None),
     x=alt.X("recall:Q", title="Laundering account-days caught", axis=alt.Axis(format="%"),
@@ -135,11 +139,38 @@ with c4:
     st.caption(f"{unc['positives']:,} of {p['positives'].sum():,} laundering account-days follow no known pattern. "
                "They barely overlap the scheme accounts and need new signals, which is the next thing to tune.")
 
+st.divider()
+
+# ------------------------------------------------------------------ 4. pattern naming (experimental)
+st.subheader("4 · Experimental: naming the pattern behind an alert")
+e2e = pd.DataFrame(d["stage2"])
+e2e = e2e[e2e["mode"] == "end_to_end"]
+macro = e2e[e2e["pattern"].str.startswith("MACRO")].iloc[0]
+named = e2e[~e2e["pattern"].str.startswith("MACRO") & (e2e["pattern"] != "unclassified")].copy()
+named["name"] = named["pattern"].str.replace("_", " ").str.capitalize()
+c5, c6 = st.columns([1, 2], gap="large")
+with c5:
+    st.metric("Pattern naming macro F1", f"{macro['f1']:.3f}",
+              help="Average F1 across the 7 named patterns, measured on stage 1's alerts.")
+    st.caption("Not reliable enough to act on. Treat a suggested pattern as a hint for the analyst, "
+               "not a finding: the alert decision comes from stage 1 alone.")
+with c6:
+    nb = alt.Chart(named).mark_bar(cornerRadiusEnd=3, size=22, color=GREY).encode(
+        y=alt.Y("name:N", sort="-x", title=None),
+        x=alt.X("f1:Q", title="F1 for naming this pattern", scale=alt.Scale(domain=[0, 1])),
+        tooltip=["name:N", alt.Tooltip("precision:Q", format=".1%"), alt.Tooltip("recall:Q", format=".1%"),
+                 alt.Tooltip("f1:Q", format=".3f")])
+    nt = nb.mark_text(align="left", dx=4, color=INK).encode(text=alt.Text("f1:Q", format=".2f"))
+    st.altair_chart((nb + nt).properties(height=260), width="stretch")
+
 with st.expander("How to read this, and its limits"):
     st.markdown(
         "- An **alert** is one account on one day. **Precision** = share of alerts that are real laundering; "
         "**recall** = share of laundering that gets an alert.\n"
         "- The threshold was fixed on HI-Small and HI-Medium validation days and never tuned on HI-Large.\n"
         "- Schemes come from the dataset's answer key (`Patterns.txt`), used only to mark results, never as model input.\n"
+        "- Timing assumes alerts are ready at midnight after the day closes. Time-to-flag within a day is not "
+        "reported, because each score uses that day's later payments.\n"
+        "- Results are not broken down by payment channel.\n"
         "- Tested on a two-week window of IBM's synthetic AML data; real banks' volumes and patterns will differ."
     )
