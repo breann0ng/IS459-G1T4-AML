@@ -1,6 +1,6 @@
 #!/bin/bash
 # BQ2 pipeline: rebuild the BQ1 final model, train a second model that has never seen fan-in /
-# fan-out, score ~10 weeks of HI-Large with both, and analyse tactics + detection week by week.
+# fan-out, score 8 weeks of HI-Large with both, and analyse tactics + detection week by week.
 # RESUMABLE: every finished step leaves a marker; after a lab timeout start a new cluster, do the
 # first-login setup, and run this again (finished steps are skipped).
 #
@@ -13,11 +13,11 @@
 #
 # Local test (no AWS): AML_LOCAL=/path/to/lake SUBMIT="spark-submit ..." bash rebuild_bq2.sh
 
-MON_FROM=${MON_FROM:-2022-08-29}   # first monitored day (Monday, week 5; 4 weeks after HI-Large starts,
+MON_FROM=${MON_FROM:-2022-09-05}   # first monitored day (Monday, week 6; 5 weeks after HI-Large starts,
                                    # so every 14-day feature window has full history)
-MON_TO=${MON_TO:-2022-11-06}       # last monitored day (Sunday, week 14; data is cut after 5 Nov)
-                                   # -> 10 weeks, in 2-week chunks that line up with BQ1's 12-25 Sep
-                                   #    test window (weeks 7-8), so those features are reused if present
+MON_TO=${MON_TO:-2022-10-30}       # last monitored day (Sunday, week 13) -> 8 weeks in 4 chunks:
+                                   # baseline weeks 6-8, the "new tactic" appears in week 10 (3 Oct).
+                                   # More weeks (more budget): MON_FROM=2022-08-29 MON_TO=2022-11-06
 CHUNK_DAYS=${CHUNK_DAYS:-14}       # HI-Large is built and scored 2 weeks at a time
 HIDE=${HIDE:-fan_in,fan_out}       # the "new tactic" the second model never sees
 KAGGLE=https://www.kaggle.com/api/v1/datasets/download/ealtman2019/ibm-transactions-for-anti-money-laundering-aml
