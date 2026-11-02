@@ -1,0 +1,41 @@
+
+=================== s2_combo1_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.538    0.470     0.501      0.183              0.344            0.532
+fan_out                    700      0.271      0.330       0.298    0.509    0.396     0.445      0.147              0.320            0.477
+gather_scatter            1604      0.403      0.425       0.414    0.560    0.493     0.525      0.111              0.441            0.559
+scatter_gather            1264      0.400      0.488       0.440    0.547    0.718     0.621      0.181              0.466            0.644
+cycle                      795      0.273      0.244       0.258    0.392    0.304     0.343      0.085              0.282            0.372
+random                     669      0.229      0.203       0.216    0.366    0.309     0.335      0.120              0.234            0.358
+layering                  2754      0.454      0.302       0.363    0.669    0.601     0.633      0.270              0.421            0.740
+unclassified              5767      0.060      0.004       0.008    0.083    0.006     0.011      0.003              0.212            0.377
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.512    0.470     0.486      0.157              0.358            0.526
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.354    0.447     0.395      0.086              0.344            0.436
+fan_out                     86      0.345      0.349       0.347    0.410    0.395     0.402      0.056              0.368            0.417
+gather_scatter             171      0.473      0.357       0.407    0.589    0.444     0.507      0.100              0.440            0.551
+scatter_gather             139      0.493      0.489       0.491    0.468    0.468     0.468     -0.023              0.519            0.494
+cycle                       83      0.300      0.253       0.275    0.393    0.265     0.317      0.042              0.313            0.349
+random                      57      0.257      0.316       0.283    0.486    0.316     0.383      0.100              0.313            0.414
+layering                   239      0.472      0.418       0.443    0.635    0.690     0.661      0.218              0.512            0.767
+unclassified               648      0.000      0.000       0.000    0.042    0.003     0.006      0.006              0.000            0.174
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.476    0.432     0.448      0.082              0.401            0.490
+
+=================== s2_vote_grp  (group_stage2.py)
+  (no results saved: the run did not finish)
+
+=================== s2_conf40_grp  (group_stage2.py)
+  (no results saved: the run did not finish)
+
+=================== s2_conf50_grp  (group_stage2.py)
+  (no results saved: the run did not finish)
+
+=================== s2_conf60_grp  (group_stage2.py)
+  (no results saved: the run did not finish)
+
+=================== s2_vote_conf50_grp  (group_stage2.py)
+  (no results saved: the run did not finish)

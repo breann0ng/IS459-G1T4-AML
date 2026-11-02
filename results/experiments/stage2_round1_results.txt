@@ -1,0 +1,348 @@
+
+=================== txn_v3m
+run at 2026-11-01 12:42:33 · 179 features · threshold 0.9763 · params {"n_estimators": 1000, "num_leaves": 127, "learning_rate": 0.03, "subsample": 0.8, "subsample_freq": 1, "colsample_bytree": 0.4, "min_child_samples": 100, "random_state": 42, "verbose": -1, "scale_pos_weight": 1}
+STAGE 1 (validation best-F1 threshold)
+  dataset              level  precision  recall    f1  alerts_per_day  pr_auc  recall_patterns  recall_unclassified
+HI-Medium account_day_rollup      0.917   0.538 0.678         2123.50   0.678              NaN                  NaN
+HI-Medium        transaction      0.898   0.554 0.685         1418.75   0.672            0.888                0.008
+ HI-Small account_day_rollup      0.899   0.508 0.649          424.00   0.640              NaN                  NaN
+ HI-Small        transaction      0.899   0.540 0.675          287.00   0.665            0.879                0.005
+top features (share of total gain): t_fmt_ach 14.1%, t_pair_age_d 13.0%, r_age_days 5.2%, s_n_cross_ccy 4.2%, t_pair_n_7d 3.7%, t_amt_rel 3.4%, r_x_trend 3.3%, s_age_days 2.3%, r_x_new_cp_in 1.6%, t_fmt_credit_card 1.6%, s_n_out 1.5%, r_cycles_today 1.3%, s_cycles_today 1.2%, s_cycles_7d 1.2%, s_out_cp_max_senders 1.1%
+
+STAGE 2 END TO END (label precision / recall / F1 over stage 1's alerts) + caught F1 + oracle F1 (diagnostic)
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1  oracle_f1
+pattern                                                                                                     
+fan_in                     943       859      287            0.334       0.304   0.319      0.344      0.323
+fan_out                    700       851      231            0.271       0.330   0.298      0.320      0.313
+gather_scatter            1604      1688      681            0.403       0.425   0.414      0.441      0.426
+scatter_gather            1264      1541      617            0.400       0.488   0.440      0.466      0.449
+cycle                      795       710      194            0.273       0.244   0.258      0.282      0.277
+random                     669       593      136            0.229       0.203   0.216      0.234      0.229
+layering                  2754      1836      833            0.454       0.302   0.363      0.421      0.431
+unclassified              5767       416       25            0.060       0.004   0.008      0.212      0.943
+MACRO (7 patterns)        8729      8078     2979            0.338       0.328   0.329      0.358      0.350
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1  oracle_f1
+pattern                                                                                                     
+fan_in                      76        92       26            0.283       0.342   0.310      0.344      0.330
+fan_out                     86        87       30            0.345       0.349   0.347      0.368      0.339
+gather_scatter             171       129       61            0.473       0.357   0.407      0.440      0.431
+scatter_gather             139       138       68            0.493       0.489   0.491      0.519      0.497
+cycle                       83        70       21            0.300       0.253   0.275      0.313      0.295
+random                      57        70       18            0.257       0.316   0.283      0.313      0.292
+layering                   239       212      100            0.472       0.418   0.443      0.512      0.493
+unclassified               648        50        0            0.000       0.000   0.000      0.000      0.929
+MACRO (7 patterns)         851       798      324            0.375       0.361   0.365      0.401      0.382
+
+=================== txn_v3m_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.530    0.495     0.512      0.194              0.344            0.543
+fan_out                    700      0.271      0.330       0.298    0.469    0.401     0.433      0.135              0.320            0.462
+gather_scatter            1604      0.403      0.425       0.414    0.570    0.471     0.516      0.102              0.441            0.548
+scatter_gather            1264      0.400      0.488       0.440    0.533    0.672     0.594      0.154              0.466            0.618
+cycle                      795      0.273      0.244       0.258    0.392    0.314     0.349      0.091              0.282            0.381
+random                     669      0.229      0.203       0.216    0.363    0.315     0.337      0.122              0.234            0.360
+layering                  2754      0.454      0.302       0.363    0.660    0.597     0.627      0.264              0.421            0.734
+unclassified              5767      0.060      0.004       0.008    0.081    0.005     0.010      0.002              0.212            0.348
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.502    0.467     0.481      0.152              0.358            0.521
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.419    0.408     0.413      0.104              0.344            0.456
+fan_out                     86      0.345      0.349       0.347    0.390    0.267     0.317     -0.030              0.368            0.326
+gather_scatter             171      0.473      0.357       0.407    0.657    0.415     0.509      0.102              0.440            0.553
+scatter_gather             139      0.493      0.489       0.491    0.457    0.647     0.536      0.045              0.519            0.559
+cycle                       83      0.300      0.253       0.275    0.353    0.289     0.318      0.043              0.313            0.364
+random                      57      0.257      0.316       0.283    0.351    0.228     0.277     -0.007              0.313            0.302
+layering                   239      0.472      0.418       0.443    0.645    0.690     0.667      0.223              0.512            0.771
+unclassified               648      0.000      0.000       0.000    0.020    0.002     0.003      0.003              0.000            0.091
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.467    0.421     0.434      0.069              0.401            0.476
+
+=================== s2_combo1_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.538    0.470     0.501      0.183              0.344            0.532
+fan_out                    700      0.271      0.330       0.298    0.509    0.396     0.445      0.147              0.320            0.477
+gather_scatter            1604      0.403      0.425       0.414    0.560    0.493     0.525      0.111              0.441            0.559
+scatter_gather            1264      0.400      0.488       0.440    0.547    0.718     0.621      0.181              0.466            0.644
+cycle                      795      0.273      0.244       0.258    0.392    0.304     0.343      0.085              0.282            0.372
+random                     669      0.229      0.203       0.216    0.366    0.309     0.335      0.120              0.234            0.358
+layering                  2754      0.454      0.302       0.363    0.669    0.601     0.633      0.270              0.421            0.740
+unclassified              5767      0.060      0.004       0.008    0.083    0.006     0.011      0.003              0.212            0.377
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.512    0.470     0.486      0.157              0.358            0.526
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.354    0.447     0.395      0.086              0.344            0.436
+fan_out                     86      0.345      0.349       0.347    0.410    0.395     0.402      0.056              0.368            0.417
+gather_scatter             171      0.473      0.357       0.407    0.589    0.444     0.507      0.100              0.440            0.551
+scatter_gather             139      0.493      0.489       0.491    0.468    0.468     0.468     -0.023              0.519            0.494
+cycle                       83      0.300      0.253       0.275    0.393    0.265     0.317      0.042              0.313            0.349
+random                      57      0.257      0.316       0.283    0.486    0.316     0.383      0.100              0.313            0.414
+layering                   239      0.472      0.418       0.443    0.635    0.690     0.661      0.218              0.512            0.767
+unclassified               648      0.000      0.000       0.000    0.042    0.003     0.006      0.006              0.000            0.174
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.476    0.432     0.448      0.082              0.401            0.490
+
+=================== s2_link3_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.536    0.474     0.503      0.185              0.344            0.534
+fan_out                    700      0.271      0.330       0.298    0.487    0.384     0.430      0.132              0.320            0.461
+gather_scatter            1604      0.403      0.425       0.414    0.562    0.484     0.520      0.107              0.441            0.554
+scatter_gather            1264      0.400      0.488       0.440    0.537    0.720     0.615      0.175              0.466            0.639
+cycle                      795      0.273      0.244       0.258    0.392    0.286     0.330      0.073              0.282            0.357
+random                     669      0.229      0.203       0.216    0.365    0.333     0.348      0.133              0.234            0.372
+layering                  2754      0.454      0.302       0.363    0.669    0.593     0.629      0.266              0.421            0.735
+unclassified              5767      0.060      0.004       0.008    0.083    0.006     0.011      0.003              0.212            0.375
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.507    0.468     0.482      0.153              0.358            0.522
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.356    0.421     0.386      0.076              0.344            0.427
+fan_out                     86      0.345      0.349       0.347    0.446    0.337     0.384      0.037              0.368            0.397
+gather_scatter             171      0.473      0.357       0.407    0.603    0.444     0.512      0.105              0.440            0.553
+scatter_gather             139      0.493      0.489       0.491    0.447    0.511     0.477     -0.014              0.519            0.498
+cycle                       83      0.300      0.253       0.275    0.396    0.253     0.309      0.034              0.313            0.350
+random                      57      0.257      0.316       0.283    0.435    0.351     0.388      0.105              0.313            0.421
+layering                   239      0.472      0.418       0.443    0.638    0.686     0.661      0.218              0.512            0.768
+unclassified               648      0.000      0.000       0.000    0.038    0.003     0.006      0.006              0.000            0.154
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.474    0.429     0.445      0.080              0.401            0.488
+
+=================== s2_slow800_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.547    0.470     0.505      0.187              0.344            0.536
+fan_out                    700      0.271      0.330       0.298    0.477    0.407     0.439      0.142              0.320            0.471
+gather_scatter            1604      0.403      0.425       0.414    0.566    0.487     0.524      0.110              0.441            0.557
+scatter_gather            1264      0.400      0.488       0.440    0.533    0.681     0.598      0.158              0.466            0.621
+cycle                      795      0.273      0.244       0.258    0.406    0.318     0.357      0.099              0.282            0.388
+random                     669      0.229      0.203       0.216    0.378    0.306     0.339      0.123              0.234            0.362
+layering                  2754      0.454      0.302       0.363    0.664    0.612     0.637      0.274              0.421            0.744
+unclassified              5767      0.060      0.004       0.008    0.075    0.005     0.009      0.001              0.212            0.335
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.510    0.469     0.486      0.156              0.358            0.526
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.419    0.408     0.413      0.104              0.344            0.456
+fan_out                     86      0.345      0.349       0.347    0.394    0.302     0.342     -0.005              0.368            0.356
+gather_scatter             171      0.473      0.357       0.407    0.629    0.386     0.478      0.072              0.440            0.520
+scatter_gather             139      0.493      0.489       0.491    0.454    0.633     0.529      0.038              0.519            0.553
+cycle                       83      0.300      0.253       0.275    0.362    0.253     0.298      0.023              0.313            0.339
+random                      57      0.257      0.316       0.283    0.432    0.281     0.340      0.057              0.313            0.368
+layering                   239      0.472      0.418       0.443    0.649    0.720     0.683      0.239              0.512            0.789
+unclassified               648      0.000      0.000       0.000    0.041    0.003     0.006      0.006              0.000            0.174
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.477    0.426     0.440      0.075              0.401            0.483
+
+=================== s2_keep30_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.524    0.474     0.498      0.179              0.344            0.530
+fan_out                    700      0.271      0.330       0.298    0.456    0.383     0.416      0.118              0.320            0.444
+gather_scatter            1604      0.403      0.425       0.414    0.562    0.481     0.518      0.104              0.441            0.551
+scatter_gather            1264      0.400      0.488       0.440    0.527    0.672     0.591      0.151              0.466            0.614
+cycle                      795      0.273      0.244       0.258    0.383    0.333     0.356      0.099              0.282            0.385
+random                     669      0.229      0.203       0.216    0.353    0.287     0.317      0.101              0.234            0.338
+layering                  2754      0.454      0.302       0.363    0.656    0.584     0.618      0.255              0.421            0.724
+unclassified              5767      0.060      0.004       0.008    0.073    0.005     0.009      0.001              0.212            0.326
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.494    0.459     0.473      0.144              0.358            0.512
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.416    0.421     0.418      0.109              0.344            0.471
+fan_out                     86      0.345      0.349       0.347    0.417    0.291     0.342     -0.004              0.368            0.355
+gather_scatter             171      0.473      0.357       0.407    0.598    0.374     0.460      0.054              0.440            0.498
+scatter_gather             139      0.493      0.489       0.491    0.449    0.633     0.525      0.034              0.519            0.552
+cycle                       83      0.300      0.253       0.275    0.397    0.325     0.358      0.083              0.313            0.397
+random                      57      0.257      0.316       0.283    0.515    0.298     0.378      0.094              0.313            0.410
+layering                   239      0.472      0.418       0.443    0.637    0.699     0.667      0.223              0.512            0.775
+unclassified               648      0.000      0.000       0.000    0.022    0.002     0.003      0.003              0.000            0.095
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.490    0.434     0.450      0.085              0.401            0.494
+
+=================== s2_keep100_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.528    0.525     0.527      0.208              0.344            0.554
+fan_out                    700      0.271      0.330       0.298    0.433    0.430     0.432      0.134              0.320            0.456
+gather_scatter            1604      0.403      0.425       0.414    0.556    0.352     0.431      0.018              0.441            0.461
+scatter_gather            1264      0.400      0.488       0.440    0.520    0.649     0.577      0.137              0.466            0.598
+cycle                      795      0.273      0.244       0.258    0.464    0.279     0.349      0.091              0.282            0.382
+random                     669      0.229      0.203       0.216    0.465    0.306     0.369      0.154              0.234            0.396
+layering                  2754      0.454      0.302       0.363    0.646    0.680     0.663      0.300              0.421            0.769
+unclassified              5767      0.060      0.004       0.008    0.078    0.006     0.011      0.003              0.212            0.330
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.516    0.460     0.478      0.149              0.358            0.517
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.400    0.421     0.410      0.101              0.344            0.451
+fan_out                     86      0.345      0.349       0.347    0.378    0.395     0.386      0.040              0.368            0.393
+gather_scatter             171      0.473      0.357       0.407    0.523    0.327     0.403     -0.004              0.440            0.436
+scatter_gather             139      0.493      0.489       0.491    0.455    0.504     0.478     -0.013              0.519            0.504
+cycle                       83      0.300      0.253       0.275    0.500    0.217     0.303      0.028              0.313            0.340
+random                      57      0.257      0.316       0.283    0.600    0.368     0.457      0.173              0.313            0.488
+layering                   239      0.472      0.418       0.443    0.581    0.724     0.644      0.201              0.512            0.749
+unclassified               648      0.000      0.000       0.000    0.042    0.003     0.006      0.006              0.000            0.200
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.491    0.422     0.440      0.075              0.401            0.480
+
+=================== s2_leaves63_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.578    0.461     0.513      0.194              0.344            0.544
+fan_out                    700      0.271      0.330       0.298    0.505    0.367     0.425      0.127              0.320            0.451
+gather_scatter            1604      0.403      0.425       0.414    0.580    0.488     0.530      0.117              0.441            0.564
+scatter_gather            1264      0.400      0.488       0.440    0.524    0.694     0.597      0.157              0.466            0.620
+cycle                      795      0.273      0.244       0.258    0.428    0.325     0.369      0.111              0.282            0.398
+random                     669      0.229      0.203       0.216    0.404    0.284     0.334      0.118              0.234            0.357
+layering                  2754      0.454      0.302       0.363    0.643    0.637     0.640      0.277              0.421            0.748
+unclassified              5767      0.060      0.004       0.008    0.081    0.006     0.011      0.003              0.212            0.351
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.523    0.465     0.487      0.157              0.358            0.526
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.424    0.368     0.394      0.085              0.344            0.441
+fan_out                     86      0.345      0.349       0.347    0.367    0.256     0.301     -0.045              0.368            0.314
+gather_scatter             171      0.473      0.357       0.407    0.629    0.386     0.478      0.072              0.440            0.518
+scatter_gather             139      0.493      0.489       0.491    0.463    0.676     0.550      0.059              0.519            0.573
+cycle                       83      0.300      0.253       0.275    0.365    0.229     0.281      0.007              0.313            0.319
+random                      57      0.257      0.316       0.283    0.400    0.246     0.304      0.021              0.313            0.329
+layering                   239      0.472      0.418       0.443    0.613    0.715     0.660      0.217              0.512            0.763
+unclassified               648      0.000      0.000       0.000    0.042    0.003     0.006      0.006              0.000            0.182
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.466    0.411     0.424      0.059              0.401            0.465
+
+=================== s2_hub60_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.538    0.472     0.503      0.184              0.344            0.534
+fan_out                    700      0.271      0.330       0.298    0.485    0.399     0.438      0.140              0.320            0.467
+gather_scatter            1604      0.403      0.425       0.414    0.554    0.478     0.513      0.099              0.441            0.546
+scatter_gather            1264      0.400      0.488       0.440    0.533    0.680     0.597      0.158              0.466            0.621
+cycle                      795      0.273      0.244       0.258    0.381    0.296     0.333      0.075              0.282            0.362
+random                     669      0.229      0.203       0.216    0.348    0.299     0.322      0.106              0.234            0.342
+layering                  2754      0.454      0.302       0.363    0.655    0.598     0.626      0.263              0.421            0.733
+unclassified              5767      0.060      0.004       0.008    0.082    0.006     0.010      0.002              0.212            0.358
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.499    0.460     0.476      0.146              0.358            0.515
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.397    0.382     0.389      0.080              0.344            0.433
+fan_out                     86      0.345      0.349       0.347    0.403    0.291     0.338     -0.009              0.368            0.347
+gather_scatter             171      0.473      0.357       0.407    0.612    0.368     0.460      0.053              0.440            0.498
+scatter_gather             139      0.493      0.489       0.491    0.455    0.655     0.537      0.046              0.519            0.560
+cycle                       83      0.300      0.253       0.275    0.354    0.337     0.346      0.071              0.313            0.397
+random                      57      0.257      0.316       0.283    0.433    0.228     0.299      0.015              0.313            0.329
+layering                   239      0.472      0.418       0.443    0.646    0.686     0.665      0.222              0.512            0.770
+unclassified               648      0.000      0.000       0.000    0.021    0.002     0.003      0.003              0.000            0.091
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.472    0.421     0.433      0.068              0.401            0.476
+
+=================== s2_minchild50_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.535    0.470     0.500      0.182              0.344            0.532
+fan_out                    700      0.271      0.330       0.298    0.466    0.397     0.429      0.131              0.320            0.458
+gather_scatter            1604      0.403      0.425       0.414    0.574    0.485     0.526      0.112              0.441            0.560
+scatter_gather            1264      0.400      0.488       0.440    0.534    0.686     0.600      0.160              0.466            0.623
+cycle                      795      0.273      0.244       0.258    0.383    0.326     0.352      0.094              0.282            0.384
+random                     669      0.229      0.203       0.216    0.355    0.294     0.322      0.106              0.234            0.344
+layering                  2754      0.454      0.302       0.363    0.662    0.595     0.627      0.264              0.421            0.734
+unclassified              5767      0.060      0.004       0.008    0.081    0.005     0.010      0.002              0.212            0.346
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.501    0.465     0.479      0.150              0.358            0.519
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.377    0.382     0.379      0.070              0.344            0.426
+fan_out                     86      0.345      0.349       0.347    0.348    0.267     0.303     -0.044              0.368            0.313
+gather_scatter             171      0.473      0.357       0.407    0.606    0.368     0.458      0.052              0.440            0.496
+scatter_gather             139      0.493      0.489       0.491    0.442    0.633     0.521      0.030              0.519            0.543
+cycle                       83      0.300      0.253       0.275    0.356    0.253     0.296      0.021              0.313            0.341
+random                      57      0.257      0.316       0.283    0.462    0.316     0.375      0.092              0.313            0.404
+layering                   239      0.472      0.418       0.443    0.625    0.678     0.651      0.207              0.512            0.755
+unclassified               648      0.000      0.000       0.000    0.044    0.003     0.006      0.006              0.000            0.182
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.459    0.414     0.426      0.061              0.401            0.469
+
+=================== s2_linked5_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.584    0.471     0.521      0.203              0.344            0.551
+fan_out                    700      0.271      0.330       0.298    0.487    0.460     0.473      0.175              0.320            0.501
+gather_scatter            1604      0.403      0.425       0.414    0.558    0.504     0.529      0.116              0.441            0.563
+scatter_gather            1264      0.400      0.488       0.440    0.545    0.680     0.605      0.165              0.466            0.628
+cycle                      795      0.273      0.244       0.258    0.346    0.288     0.315      0.057              0.282            0.341
+random                     669      0.229      0.203       0.216    0.339    0.286     0.310      0.095              0.234            0.332
+layering                  2754      0.454      0.302       0.363    0.701    0.620     0.658      0.295              0.421            0.773
+unclassified              5767      0.060      0.004       0.008    0.088    0.006     0.011      0.003              0.212            0.395
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.509    0.473     0.487      0.158              0.358            0.527
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.391    0.355     0.372      0.063              0.344            0.412
+fan_out                     86      0.345      0.349       0.347    0.410    0.291     0.340     -0.007              0.368            0.345
+gather_scatter             171      0.473      0.357       0.407    0.518    0.427     0.468      0.061              0.440            0.502
+scatter_gather             139      0.493      0.489       0.491    0.471    0.525     0.497      0.006              0.519            0.520
+cycle                       83      0.300      0.253       0.275    0.322    0.229     0.268     -0.007              0.313            0.309
+random                      57      0.257      0.316       0.283    0.400    0.246     0.304      0.021              0.313            0.329
+layering                   239      0.472      0.418       0.443    0.618    0.724     0.667      0.223              0.512            0.778
+unclassified               648      0.000      0.000       0.000    0.042    0.003     0.006      0.006              0.000            0.174
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.447    0.399     0.417      0.051              0.401            0.456
+
+=================== s2_hub15_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.526    0.467     0.494      0.176              0.344            0.525
+fan_out                    700      0.271      0.330       0.298    0.448    0.386     0.414      0.117              0.320            0.442
+gather_scatter            1604      0.403      0.425       0.414    0.560    0.469     0.510      0.096              0.441            0.543
+scatter_gather            1264      0.400      0.488       0.440    0.543    0.676     0.602      0.162              0.466            0.625
+cycle                      795      0.273      0.244       0.258    0.366    0.311     0.336      0.078              0.282            0.366
+random                     669      0.229      0.203       0.216    0.355    0.303     0.327      0.112              0.234            0.349
+layering                  2754      0.454      0.302       0.363    0.655    0.596     0.624      0.261              0.421            0.731
+unclassified              5767      0.060      0.004       0.008    0.080    0.005     0.010      0.002              0.212            0.350
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.493    0.458     0.473      0.143              0.358            0.512
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.360    0.408     0.383      0.073              0.344            0.425
+fan_out                     86      0.345      0.349       0.347    0.400    0.326     0.359      0.012              0.368            0.371
+gather_scatter             171      0.473      0.357       0.407    0.604    0.339     0.434      0.028              0.440            0.472
+scatter_gather             139      0.493      0.489       0.491    0.456    0.633     0.530      0.039              0.519            0.553
+cycle                       83      0.300      0.253       0.275    0.379    0.301     0.336      0.061              0.313            0.373
+random                      57      0.257      0.316       0.283    0.394    0.228     0.289      0.005              0.313            0.317
+layering                   239      0.472      0.418       0.443    0.637    0.690     0.663      0.219              0.512            0.776
+unclassified               648      0.000      0.000       0.000    0.044    0.003     0.006      0.006              0.000            0.182
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.461    0.418     0.428      0.063              0.401            0.470
+
+=================== s2_link1_grp  (group_stage2.py)
+-- HI-Medium · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                     943      0.334      0.304       0.319    0.483    0.402     0.439      0.120              0.344            0.467
+fan_out                    700      0.271      0.330       0.298    0.446    0.374     0.407      0.109              0.320            0.436
+gather_scatter            1604      0.403      0.425       0.414    0.543    0.467     0.502      0.088              0.441            0.533
+scatter_gather            1264      0.400      0.488       0.440    0.533    0.660     0.590      0.150              0.466            0.612
+cycle                      795      0.273      0.244       0.258    0.378    0.318     0.346      0.088              0.282            0.375
+random                     669      0.229      0.203       0.216    0.337    0.294     0.314      0.099              0.234            0.336
+layering                  2754      0.454      0.302       0.363    0.632    0.580     0.605      0.242              0.421            0.707
+unclassified              5767      0.060      0.004       0.008    0.073    0.005     0.009      0.001              0.212            0.315
+MACRO (7 patterns)        8729      0.338      0.328       0.329    0.479    0.442     0.457      0.128              0.358            0.495
+-- HI-Small · END TO END (account = today's namer, group = + group shape)
+                    true_cases  account_P  account_R  account_F1  group_P  group_R  group_F1  change_F1  caught_account_F1  caught_group_F1
+pattern                                                                                                                                    
+fan_in                      76      0.283      0.342       0.310    0.398    0.434     0.415      0.106              0.344            0.462
+fan_out                     86      0.345      0.349       0.347    0.327    0.198     0.246     -0.100              0.368            0.254
+gather_scatter             171      0.473      0.357       0.407    0.626    0.363     0.459      0.053              0.440            0.496
+scatter_gather             139      0.493      0.489       0.491    0.421    0.633     0.506      0.015              0.519            0.527
+cycle                       83      0.300      0.253       0.275    0.429    0.361     0.392      0.118              0.313            0.441
+random                      57      0.257      0.316       0.283    0.487    0.333     0.396      0.112              0.313            0.432
+layering                   239      0.472      0.418       0.443    0.649    0.682     0.665      0.222              0.512            0.776
+unclassified               648      0.000      0.000       0.000    0.044    0.003     0.006      0.006              0.000            0.211
+MACRO (7 patterns)         851      0.375      0.361       0.365    0.477    0.429     0.440      0.075              0.401            0.484

@@ -150,19 +150,71 @@ else:
 
 st.divider()
 
-# ------------------------------------------------------------------ 4. ceiling
-st.subheader("4 · Stage 2 can only name what stage 1 flags")
+# ------------------------------------------------------------------ 4. top-2
+st.subheader("4 · Showing the analyst two guesses")
+mine_all = per[(per["dataset"] == ds_name) & (per["config"] == pick) & (per["pattern"] != "unclassified")]
+t1 = mine_all[(mine_all["mode"] == "caught") & ~mine_all["pattern"].str.startswith("MACRO")]
+t2 = mine_all[(mine_all["mode"] == "caught_top2") & ~mine_all["pattern"].str.startswith("MACRO")]
+if t2.empty:
+    st.info(f"No top-2 results for {pick}. Runs from the current group_stage2.py save them.")
+else:
+    st.caption("On alerts that really are a known pattern: how often the right name is the first guess, "
+               "and how often it is one of the first two. Look-alike patterns (fan out / scatter gather) are "
+               "often confused, but rarely missed by both guesses.")
+    tt = pd.concat([t1.assign(guess="First guess"), t2.assign(guess="Top 2 guesses")])
+    tt["pattern_name"] = tt["pattern"].map(nice)
+    order2 = t2.assign(pattern_name=t2["pattern"].map(nice)).sort_values("recall", ascending=False)["pattern_name"].tolist()
+    m1, m2 = st.columns([1, 2], gap="large")
+    with m1:
+        st.metric("Right name in the first guess", f"{t1['recall'].mean():.0%}")
+        st.metric("Right name in the top 2", f"{t2['recall'].mean():.0%}",
+                  f"+{t2['recall'].mean() - t1['recall'].mean():.0%} with a second guess")
+    with m2:
+        y2 = alt.Y("pattern_name:N", sort=order2, title=None)
+        rule2 = alt.Chart(tt).mark_rule(color="#D9D3CA", strokeWidth=2).encode(
+            y=y2, x=alt.X("min(recall):Q"), x2=alt.X2("max(recall):Q"))
+        dots2 = alt.Chart(tt).mark_point(filled=True, size=120, opacity=1).encode(
+            y=y2, x=alt.X("recall:Q", title="Truly laundering alerts given the right name", axis=alt.Axis(format="%"),
+                          scale=alt.Scale(domain=[0, 1])),
+            color=alt.Color("guess:N", scale=alt.Scale(domain=["First guess", "Top 2 guesses"], range=[GREY, BLUE]),
+                            legend=alt.Legend(title=None, orient="top")),
+            tooltip=[alt.Tooltip("pattern_name:N", title="Pattern"), "guess:N",
+                     alt.Tooltip("recall:Q", format=".1%", title="Right"), alt.Tooltip("true_cases:Q", format=",")])
+        st.altair_chart((rule2 + dots2).properties(height=alt.Step(36)), width="stretch")
+
+st.divider()
+
+# ------------------------------------------------------------------ 5. ceiling
+st.subheader("5 · Stage 2 can only name what stage 1 flags")
 s1d = s1[s1["dataset"] == ds_name]
+if "stage1_config" not in s1d:
+    s1d = s1d.assign(stage1_config=d["stage1_config"])
+cur1 = s1d[s1d["stage1_config"] == d["stage1_config"]]
+ref1 = s1d[s1d["stage1_config"] == d.get("baseline_stage1_config", d["stage1_config"])]
+moved = len(ref1) and len(cur1) and d.get("baseline_stage1_config", d["stage1_config"]) != d["stage1_config"]
 caught = per[(per["dataset"] == ds_name) & (per["mode"] == "caught") & (per["config"] == pick)
              & (per["pattern"] != "unclassified")]
-e1, e2, e3 = st.columns(3)
-if len(s1d):
-    r1 = s1d.iloc[0]
-    e1.metric("Stage 1 alerts that are laundering", f"{r1['precision']:.0%}",
+
+
+def d1(col, fmt="{:+.1%}"):
+    return fmt.format(cur1.iloc[0][col] - ref1.iloc[0][col]) + " vs baseline stage 1" if moved else None
+
+
+e0, e1, e2, e3 = st.columns(4)
+if len(cur1):
+    r1 = cur1.iloc[0]
+    if r1.get("expand", 0):
+        st.caption(f"Stage 1 = **{d['stage1_config']}** with alert expansion: a payment scoring ≥ {r1['expand']:g} "
+                   "next to a confident alert makes its counterparty an alert too (following the money).")
+    e0.metric("Laundering account-days flagged", f"{r1['recall']:.0%}", d1("recall"),
+              help="Stage 1 recall at account-day level, on the alerts handed to stage 2.")
+    e1.metric("Stage 1 alerts that are laundering", f"{r1['precision']:.0%}", d1("precision"),
               help=f"About {r1['alerts_per_day']:,.0f} account alerts a day on {ds_name}.")
     e2.metric("Patterned laundering flagged by stage 1",
               f"{r1['recall_patterns']:.0%}" if pd.notna(r1.get("recall_patterns")) else "n/a",
-              help="Payment level. The rest never reaches stage 2: this is the ceiling on pattern recall.")
+              d1("recall_patterns") if pd.notna(r1.get("recall_patterns")) and moved
+              and pd.notna(ref1.iloc[0].get("recall_patterns")) else None,
+              help="The rest never reaches stage 2: this is the ceiling on pattern recall.")
 e3.metric("Pattern F1 on true alerts only", f"{caught['f1'].mean():.3f}" if len(caught) else "n/a",
           help="Naming quality when the false alerts are left out: how good the namer itself is.")
 st.caption("If F1 on true alerts is much higher than end-to-end F1, the losses come from false alerts and missed "

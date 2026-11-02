@@ -13,6 +13,8 @@ Plain Python on one machine (laptop or EMR master), after build_txn_features_spa
     python3 train_txn.py --txn-table txn_features_v3 --stage2-features features_v3 --preset p3 --config txn_v3
                                                             round 3 step 2 features
     python3 train_txn.py --train-datasets HI-Small --config txn_small   train/validate on one dataset
+    python3 train_txn.py ... --expand auto --config txn_v3m_xp   follow the money from the alerts
+                                                            (stage 2 names the expanded alerts)
     python3 train_txn.py --config txn_final --test          final run only
 
 Split (same rule as train_ml.py cross_dataset)
@@ -80,6 +82,9 @@ PRESETS = {
            "colsample_bytree": 0.4},                                   # p2, fewer features per tree
 }
 SCORE_CUTOFFS = [0.5, 0.9, 0.95, 0.99]
+# Alert expansion (--expand): a payment scoring >= LOW whose other end is already an alert
+# (same day) makes its counterparty an alert too. Every run reports this grid of LOW values.
+EXPAND_LOWS = [0.3, 0.5, 0.7, 0.9]
 TOP_K_PER_DAY = [100, 1000, 5000]
 BATCH_SIZE = 100_000          # rows read at a time; lower it if memory is tight
 PATTERNS = ["fan_in", "fan_out", "gather_scatter", "scatter_gather", "cycle",
@@ -207,6 +212,26 @@ def metrics(y, mask, days, scheme=None):
     return row
 
 
+def expand_alerts(v, ad, seed, low, hops=1):
+    """Follow the money from the alerts: an account-day that is not an alert becomes one if it
+    has a payment scoring >= low with an account-day that is (same day). Repeated `hops` times.
+    v: payment arrays (s, s_id, r_id, date); ad: account-day roll-up indexed by (id, date);
+    seed: boolean alert mask aligned with ad. Returns the expanded mask."""
+    m = v["s"] >= low
+    snd = pd.MultiIndex.from_arrays([v["s_id"][m], v["date"][m]])
+    rcv = pd.MultiIndex.from_arrays([v["r_id"][m], v["date"][m]])
+    alert = seed.copy()
+    for _ in range(hops):
+        idx = ad.index[alert]
+        s_in, r_in = snd.isin(idx), rcv.isin(idx)
+        new = rcv[s_in & ~r_in].append(snd[r_in & ~s_in])
+        grown = alert | ad.index.isin(new)
+        if grown.sum() == alert.sum():
+            break
+        alert = grown
+    return alert
+
+
 def topk(date, s, k):
     order = np.lexsort((-s, date))
     d = date[order]
@@ -237,6 +262,10 @@ def main():
                     help="account-day feature table for the pattern namer (default features_v2)")
     ap.add_argument("--merge-layering", action="store_true", help="stage 2: bipartite + stack -> layering")
     ap.add_argument("--no-stage2", action="store_true", help="skip the end-to-end stage 2")
+    ap.add_argument("--expand", default="0",
+                    help="alert expansion for the alerts handed to stage 2: a LOW score (e.g. 0.5), "
+                         "'auto' = the LOW with the best account-day F1 on validation, 0 = off")
+    ap.add_argument("--expand-hops", type=int, default=1, help="how many times to follow the money")
     ap.add_argument("--new-groups", default="x,o,t",
                     help="v3 feature groups to use: x = unusual for this account, o = owner, "
                          "t = new payment features; e.g. --new-groups x (default all)")
@@ -326,21 +355,50 @@ def main():
                          "pr_auc": pr_auc, **metrics(y, m, days, v["scheme"])})
         # account-day roll-up: max payment score per (account, day), sent or received
         ad = pd.DataFrame({"id": np.r_[v["s_id"], v["r_id"]], "date": np.r_[date, date],
-                           "s": np.r_[s, s], "y": np.r_[y, y]})
-        ad = ad.groupby(["id", "date"], sort=False).agg(s=("s", "max"), y=("y", "max"))
-        rollups[(d, sp)] = ad
-        ay, as_ = ad["y"].to_numpy(bool), ad["s"].to_numpy()
+                           "s": np.r_[s, s], "y": np.r_[y, y], "sch": np.r_[v["scheme"], v["scheme"]]})
+        ad = ad.groupby(["id", "date"], sort=False).agg(s=("s", "max"), y=("y", "max"), sch=("sch", "max"))
+        ay, as_, asch = ad["y"].to_numpy(bool), ad["s"].to_numpy(), ad["sch"].to_numpy(bool)
         adate = ad.index.get_level_values("date").to_numpy()
         a_auc = float(average_precision_score(ay, as_)) if ay.any() else None
-        for cut, m in {"val_best_f1": as_ >= thr, "top100/day": topk(adate, as_, 100),
-                       "top1000/day": topk(adate, as_, 1000)}.items():
+        seed = as_ >= thr
+        cuts = {"val_best_f1": seed, "top100/day": topk(adate, as_, 100),
+                "top1000/day": topk(adate, as_, 1000)}
+        cuts.update({f"expand{low}": expand_alerts(v, ad, seed, low, a.expand_hops) for low in EXPAND_LOWS})
+        for cut, m in cuts.items():
             rows.append({"dataset": d, "split": sp, "level": "account_day_rollup", "cutoff": cut,
-                         "pr_auc": a_auc, **metrics(ay, m, days)})
+                         "pr_auc": a_auc, **metrics(ay, m, days, asch)})
+        ad["alert"] = seed
+        if a.expand not in ("0", "auto"):
+            ad["alert"] = cuts.get(f"expand{float(a.expand)}", None) if float(a.expand) in EXPAND_LOWS \
+                else expand_alerts(v, ad, seed, float(a.expand), a.expand_hops)
+        for low in EXPAND_LOWS:                      # kept for --expand auto (chosen below)
+            ad[f"_x{low}"] = cuts[f"expand{low}"]
+        rollups[(d, sp)] = ad
+    res_ad = pd.DataFrame([r for r in rows if r["level"] == "account_day_rollup" and r["split"] == "validation"])
+    if a.expand == "auto":
+        f1 = res_ad.groupby("cutoff")["f1"].mean()
+        low = max(EXPAND_LOWS, key=lambda x: f1.get(f"expand{x}", -1))
+        if f1.get(f"expand{low}", -1) <= f1.get("val_best_f1", 0):
+            low = None
+        print(f"[expand] auto: best LOW = {low} (mean account-day F1 "
+              f"{f1.get(f'expand{low}', f1.get('val_best_f1')):.4f} vs no expansion {f1.get('val_best_f1'):.4f})")
+        for ad in rollups.values():
+            if low is not None:
+                ad["alert"] = ad[f"_x{low}"]
+        a.expand = str(low or 0)
+    for ad in rollups.values():
+        ad.drop(columns=[c for c in ad.columns if c.startswith("_x")], inplace=True)
+    for (d, sp), ad in rollups.items():              # the alerts stage 2 will name
+        ay, am = ad["y"].to_numpy(bool), ad["alert"].to_numpy(bool)
+        n_days = len(np.unique(ad.index.get_level_values("date")))
+        rows.append({"dataset": d, "split": sp, "level": "account_day_rollup", "cutoff": "alerts_used",
+                     "pr_auc": None, **metrics(ay, am, n_days, ad["sch"].to_numpy(bool))})
     res = pd.DataFrame(rows)
     res["model"], res["config"], res["threshold_val_best_f1"] = "lightgbm", CONFIG_NAME, thr
     res["params_json"], res["n_features"], res["run_at"] = json.dumps(PARAMS), len(feat), RUN_AT
     res["txn_table"], res["stage2_features"] = a.txn_table, a.stage2_features
     res["new_groups"] = ",".join(sorted(a.groups))
+    res["expand"], res["expand_hops"] = float(a.expand), a.expand_hops
     res["train_end_dates"] = json.dumps({k: str(v) for k, v in train_end.items()})
     write_results(res, "txn_results")
 
@@ -353,7 +411,8 @@ def main():
         stage2_end_to_end(a, train_end, rollups, thr)
 
     with pd.option_context("display.width", 220, "display.max_columns", 20):
-        show = res[res["cutoff"].isin(["val_best_f1", "top100/day", "top1000/day"])]
+        show = res[res["cutoff"].isin(["val_best_f1", "top100/day", "top1000/day", "alerts_used"])
+                   | res["cutoff"].str.startswith("expand")]
         print(show[["dataset", "split", "level", "cutoff", "alerts", "precision", "recall", "f1",
                     "recall_patterns", "recall_unclassified", "alerts_per_day", "pr_auc"]]
               .round(4).to_string(index=False))
@@ -381,7 +440,7 @@ def stage2_end_to_end(a, train_end, rollups, thr):
     full2 = open_dataset(f"{CURATED}/{a.stage2_features}")
     tables, alerts_out = [], []
     for (d, sp), ad in sorted(rollups.items()):
-        flagged = ad[ad["s"] >= thr].reset_index()[["id", "date", "s"]]
+        flagged = ad[ad["alert"]].reset_index()[["id", "date", "s"]]       # thr, or expanded
         flagged["date"] = pd.to_datetime(flagged["date"]).dt.date
         keys = set(zip(flagged["id"], flagged["date"]))
         start = min(flagged["date"]) if len(flagged) else None

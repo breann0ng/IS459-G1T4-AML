@@ -7,6 +7,9 @@ Plain Python on the EMR primary node (needs scheme_stage2.py in the same folder)
     python3 group_stage2.py txn_v3m                 stage 1 + namer = that train_txn.py run
     python3 group_stage2.py txn_v3m --param num_leaves=63 --out-config s2_leaves63
                                                     one namer / grouping setting changed
+    python3 group_stage2.py txn_v3m --group-vote --min-confidence 0.5 --out-config s2_vote_c50
+                                                    one name per group; unsure -> unclassified
+    Every run also saves the top-2 hit rate (mode "caught_top2").
 
 What changed from Task C (scheme_stage2.py)
     1. Groups are built from the PAYMENT model's alerts (txn_alerts of the given run), which
@@ -29,12 +32,14 @@ Writes  analytics/group_stage2/            per class P / R / F1 per dataset, met
 """
 
 import argparse
+import datetime as dt
 import json
 import time
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import networkx as nx
 from collections import defaultdict
@@ -76,13 +81,113 @@ def build_groups(nodes, payments):
     return gid, e[same], len(hub)
 
 
+# ============================================================== context: one step outside the group
+ONWARD_DAYS = 2                  # how long after receiving an outside account may pass the money on
+
+
+def _scan(dataset, start, end, mask):
+    """Payments of one dataset in [start, end] whose raw rows pass mask(batch)."""
+    tx = S.open_dataset(f"{S.CURATED}/transactions")
+    flt = ((ds.field("dataset") == dataset)
+           & (ds.field("txn_date") >= pa.scalar(start, pa.date32()))
+           & (ds.field("txn_date") <= pa.scalar(end, pa.date32())))
+    cols = ["txn_time", "txn_date", "from_bank", "from_account", "to_bank", "to_account",
+            "amount_paid", "payment_currency", "payment_format"]
+    out = [b.filter(mask(b)).to_pandas() for b in tx.scanner(columns=cols, filter=flt, batch_size=S.BATCH_SIZE,
+                                                             batch_readahead=1, fragment_readahead=1).to_batches()
+           if b.num_rows]
+    p = pd.concat([o for o in out if len(o)], ignore_index=True) if any(len(o) for o in out) \
+        else pd.DataFrame(columns=cols)
+    p["src"], p["dst"] = S.key(p["from_bank"], p["from_account"]), S.key(p["to_bank"], p["to_account"])
+    p = p[p["src"] != p["dst"]].copy()
+    p["date"] = pd.to_datetime(p["txn_date"]).dt.date
+    p["amount_paid"] = p["amount_paid"].astype(float)
+    return p
+
+
+def context_for(rows):
+    """Per dataset: (inner, hop1, hop2).
+    inner = payments with BOTH ends among the rows' accounts (exactly S.payments_for: the groups
+            are built from these, so they do not change);
+    hop1  = every payment with at least one end among them (money entering / leaving the group);
+    hop2  = onward payments of the outside accounts that received money from them."""
+    out = {}
+    for d, r in rows.groupby("dataset"):
+        accts = set(S.key(r["acct_bank"], r["acct"]))
+        start, end = min(r["date"]), max(r["date"])
+        names = pa.array(sorted({a.split("|", 1)[1] for a in accts}))
+        hop1 = _scan(d, start, end, lambda b: pc.or_(pc.is_in(b["from_account"], names),
+                                                     pc.is_in(b["to_account"], names)))
+        s_in, d_in = hop1["src"].isin(accts), hop1["dst"].isin(accts)
+        hop1 = hop1[s_in | d_in]
+        inner = hop1[hop1["src"].isin(accts) & hop1["dst"].isin(accts)]
+        outside = set(hop1.loc[hop1["src"].isin(accts) & ~hop1["dst"].isin(accts), "dst"])
+        names2 = pa.array(sorted({a.split("|", 1)[1] for a in outside}))
+        hop2 = _scan(d, start, end + dt.timedelta(days=ONWARD_DAYS), lambda b: pc.is_in(b["from_account"], names2))
+        hop2 = hop2[hop2["src"].isin(outside)]
+        print(f"[context] {d}: {len(inner)} inner payments, {len(hop1) - len(inner)} in/out of the accounts, "
+              f"{len(hop2)} onward payments of {len(outside)} outside receivers")
+        out[d] = (inner, hop1, hop2)
+    return out
+
+
+def context_features(r, gid, hop1, hop2):
+    """Group + role features from payments that cross the group's border (no labels used).
+    c_bridge          outside accounts that receive from the group AND pay back into it
+                      (scatter-gather / cycle with unflagged middle accounts)
+    c_reconverge      largest share of the group's outside receivers that pay ONE common account
+                      within ONWARD_DAYS (scatter-gather whose gather account was not flagged)
+    c_passthrough     share of outside receivers that pass money on within ONWARD_DAYS (mules)
+    c_ext_out/in_*    payments and counterparties outside the group; max per account
+    rc_ext_out/in_cp  this account-day's outside counterparties"""
+    gs = np.array([gid.get((s, d), -1) for s, d in zip(hop1["src"], hop1["date"])], dtype=np.int64)
+    gd = np.array([gid.get((t, d), -1) for t, d in zip(hop1["dst"], hop1["date"])], dtype=np.int64)
+    out_e = hop1[(gs >= 0) & (gd != gs)].assign(g=gs[(gs >= 0) & (gd != gs)])[["g", "src", "dst", "date"]]
+    out_e.columns = ["g", "acct", "x", "date"]
+    in_e = hop1[(gd >= 0) & (gs != gd)].assign(g=gd[(gd >= 0) & (gs != gd)])[["g", "dst", "src", "date"]]
+    in_e.columns = ["g", "acct", "x", "date"]
+    G = pd.DataFrame(index=pd.Index(sorted(set(gid.values())), name="g"))
+    G["c_ext_out"] = out_e.groupby("g").size()
+    G["c_ext_out_cp"] = out_e.groupby("g")["x"].nunique()
+    G["c_ext_in"] = in_e.groupby("g").size()
+    G["c_ext_in_cp"] = in_e.groupby("g")["x"].nunique()
+    G["c_max_ext_out_cp"] = out_e.groupby(["g", "acct"])["x"].nunique().groupby("g").max()
+    G["c_max_ext_in_cp"] = in_e.groupby(["g", "acct"])["x"].nunique().groupby("g").max()
+    br = out_e[["g", "x"]].drop_duplicates().merge(in_e[["g", "x"]].drop_duplicates(), on=["g", "x"])
+    G["c_bridge"] = br.groupby("g").size()
+    # onward: outside receiver x got money from account a on day d1, then paid y on d1..d1+ONWARD_DAYS
+    first = out_e.groupby(["g", "x"]).agg(d1=("date", "min"), a=("acct", "first")).reset_index()
+    on = first.merge(hop2[["src", "dst", "date"]].rename(columns={"src": "x", "dst": "y"}), on="x")
+    lag = (pd.to_datetime(on["date"]) - pd.to_datetime(on["d1"])).dt.days
+    on = on[(lag >= 0) & (lag <= ONWARD_DAYS) & (on["y"] != on["a"])]
+    G["c_passthrough"] = on.groupby("g")["x"].nunique()
+    G["c_reconverge_n"] = on.groupby(["g", "y"])["x"].nunique().groupby("g").max()
+    G = G.fillna(0.0)
+    G["c_passthrough"] = G["c_passthrough"] / G["c_ext_out_cp"].clip(lower=1)
+    G["c_reconverge"] = np.where(G["c_ext_out_cp"] >= 2, G["c_reconverge_n"] / G["c_ext_out_cp"].clip(lower=1), 0.0)
+    G["c_bridge_share"] = G["c_bridge"] / G["c_ext_out_cp"].clip(lower=1)
+    node_out = out_e.groupby(["acct", "date"])["x"].nunique()
+    node_in = in_e.groupby(["acct", "date"])["x"].nunique()
+    keys = pd.MultiIndex.from_arrays([r["k"], r["date"]])
+    f = G.reindex([gid[(k, dt)] for k, dt in zip(r["k"], r["date"])]).reset_index(drop=True)
+    f["rc_ext_out_cp"] = node_out.reindex(keys).fillna(0).to_numpy()
+    f["rc_ext_in_cp"] = node_in.reindex(keys).fillna(0).to_numpy()
+    f.index = r.index
+    return f
+
+
 def with_groups(rows, payments_by_ds, label=""):
     parts = []
     for d, r in rows.groupby("dataset"):
         r = r.copy()
         r["k"] = S.key(r["acct_bank"], r["acct"])
-        gid, edges, n_hub = build_groups(r, payments_by_ds[d])
+        pay = payments_by_ds[d]
+        ctx = isinstance(pay, tuple)                 # (inner, hop1, hop2) from context_for
+        gid, edges, n_hub = build_groups(r, pay[0] if ctx else pay)
         gf = S.group_features(r, gid, edges)
+        if ctx:
+            gf = pd.concat([gf, context_features(r, gid, pay[1], pay[2])], axis=1)
+        gf["group_id"] = [f"{d}#{gid[(k, dt)]}" for k, dt in zip(r["k"], r["date"])]
         print(f"[groups] {label} {d}: {len(r)} account-days -> {len(set(gid.values()))} groups "
               f"({len(r) / max(len(set(gid.values())), 1):.1f} per group), {len(edges)} linking payments, "
               f"{n_hub} busy accounts kept apart, largest group {int(gf['g_nodes'].max())}")
@@ -131,6 +236,12 @@ def main():
     ap.add_argument("--hub-degree", type=int, default=HUB_DEGREE)
     ap.add_argument("--max-linked-days", type=int, default=MAX_LINKED_DAYS)
     ap.add_argument("--link-days", type=int, default=S.LINK_DAYS)
+    ap.add_argument("--group-vote", action="store_true",
+                    help="average the namer's probabilities over each group: one name per group")
+    ap.add_argument("--context", action="store_true",
+                    help="add features from payments that cross the group border (one step outside)")
+    ap.add_argument("--min-confidence", type=float, default=0.0,
+                    help="name 'unclassified' (analyst decides) when the top probability is below this")
     a = ap.parse_args()
     out_cfg = a.out_config or f"{a.stage1}_grp"
     if not out_cfg.endswith("_grp"):
@@ -140,7 +251,8 @@ def main():
     HUB_DEGREE, MAX_LINKED_DAYS, S.LINK_DAYS = a.hub_degree, a.max_linked_days, a.link_days
     S.STAGE2_PARAMS.update({k: value(v) for k, v in (p.split("=", 1) for p in a.param)})
     settings = {"namer_params": S.STAGE2_PARAMS, "keep_rates": KEEP_RATES, "hub_degree": HUB_DEGREE,
-                "max_linked_days": MAX_LINKED_DAYS, "link_days": S.LINK_DAYS, "features": a.features}
+                "max_linked_days": MAX_LINKED_DAYS, "link_days": S.LINK_DAYS, "features": a.features,
+                "group_vote": a.group_vote, "min_confidence": a.min_confidence, "context": a.context}
     print(f"[settings] {json.dumps(settings)}")
     t0 = time.time()
 
@@ -163,13 +275,13 @@ def main():
     smp["date"] = pd.to_datetime(smp["date"]).dt.date
     smp = smp[[dt_ <= train_end[d] for d, dt_ in zip(smp["dataset"], smp["date"])]].reset_index(drop=True)
     feat = [c for c in smp.columns if c not in META]
-    pays = S.payments_for(smp)
+    pays = context_for(smp) if a.context else S.payments_for(smp)
     copies = []
     for i, keep in enumerate(KEEP_RATES):
         part = smp if keep >= 1 else smp.sample(frac=keep, random_state=SEED + i)
         copies.append(with_groups(part, pays, f"train keep={keep:.0%}"))
     train = pd.concat(copies, ignore_index=True)
-    gcols = [c for c in train.columns if c.startswith(("g_", "r_"))]
+    gcols = [c for c in train.columns if c.startswith(("g_", "r_", "c_", "rc_"))]
     y = S.true_class(train, merge).to_numpy()
     model = S.fit(train[feat + gcols].fillna(0.0).to_numpy(np.float32), y)
     print(f"[train] group namer on {len(train)} rows ({len(feat)} account-day + {len(gcols)} group "
@@ -194,9 +306,17 @@ def main():
         g["true"] = np.where(g["label"] == 1, S.true_class(g, merge).to_numpy(), "not_laundering")
         total_true = g.loc[g["label"] == 1, "true"].value_counts().to_dict()
         flagged = g[g["flagged"]].copy()
-        pays_v = S.payments_for(flagged)
+        pays_v = context_for(flagged) if a.context else S.payments_for(flagged)
         fg = with_groups(flagged, pays_v, "alerts")
-        fg["pred_group"] = model.predict(fg[feat + gcols].fillna(0.0).to_numpy(np.float32))
+        proba = pd.DataFrame(model.predict_proba(fg[feat + gcols].fillna(0.0).to_numpy(np.float32)),
+                             columns=model.classes_, index=fg.index)
+        if a.group_vote:                      # one name per group: average its members' probabilities
+            proba = proba.groupby(fg["group_id"]).transform("mean")
+        fg["pred_group"] = proba.idxmax(axis=1)
+        if a.min_confidence:                  # not sure enough: leave it to the analyst
+            fg.loc[proba.max(axis=1) < a.min_confidence, "pred_group"] = "unclassified"
+        top2 = np.asarray(model.classes_)[np.argsort(-proba.to_numpy(), axis=1)[:, :2]]
+        fg["top2_hit"] = [t in row for t, row in zip(fg["true"], top2)]
         acc = al.set_index(["acct_bank", "acct", "date"])["predicted_pattern"]
         fg["pred_account"] = acc.reindex(pd.MultiIndex.from_arrays(
             [fg["acct_bank"].astype(al["acct_bank"].dtype), fg["acct"], fg["date"]])).to_numpy()
@@ -212,6 +332,19 @@ def main():
                             ("caught", class_table(fg["true"].to_numpy()[caught], pred[caught], classes))]:
                 t["dataset"], t["method"], t["mode"] = d, method, mode
                 tables.append(t)
+        # top-2: of the truly laundering, patterned alerts, how often the true pattern is in the
+        # namer's two best guesses (what an analyst sees with "fan out or scatter gather")
+        tp = fg[(fg["label"] == 1) & (fg["true"] != "unclassified")]
+        t2 = (tp.groupby("true").agg(true_cases=("top2_hit", "size"), correct=("top2_hit", "sum"))
+                .reset_index().rename(columns={"true": "pattern"}))
+        t2["recall"] = t2["correct"] / t2["true_cases"]
+        t2 = pd.concat([t2, pd.DataFrame([{"pattern": f"MACRO ({len(t2)} patterns)",
+                                           "true_cases": int(t2["true_cases"].sum()),
+                                           "correct": int(t2["correct"].sum()), "recall": t2["recall"].mean()}])],
+                       ignore_index=True)
+        t2["dataset"], t2["method"], t2["mode"] = d, "group", "caught_top2"
+        tables.append(t2)
+        print(f"-- {d} · top-2 hit rate on true patterned alerts: {t2['recall'].iloc[-1]:.3f} (macro)")
         e_acc = [t for t in tables if (t["dataset"].iloc[0], t["method"].iloc[0], t["mode"].iloc[0]) == (d, "account", "end_to_end")][0]
         e_grp = [t for t in tables if (t["dataset"].iloc[0], t["method"].iloc[0], t["mode"].iloc[0]) == (d, "group", "end_to_end")][0]
         show = e_acc[["pattern", "true_cases"]].copy()
