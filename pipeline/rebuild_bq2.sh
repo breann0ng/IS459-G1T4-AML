@@ -34,7 +34,11 @@ else
   export AML_ROOT="s3://$BUCKET"; P="$AML_ROOT/progress/bq2"; PY=python3
   S3CONF="--conf spark.hadoop.fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem --conf spark.hadoop.fs.s3a.aws.credentials.provider=com.amazonaws.auth.InstanceProfileCredentialsProvider,software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider"
   DRV="--driver-memory 6g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1"
-  SUBMIT="spark-submit $S3CONF $DRV"
+  # HI-Large chunks need more memory headroom per task than the defaults give (executors were lost
+  # on m5.xlarge with 4 tasks per executor): 2 tasks per executor + 2g overhead, more shuffle partitions
+  export AML_SHUFFLE=${AML_SHUFFLE:-1000}
+  SPARK_EXTRA=${SPARK_EXTRA:---conf spark.executor.cores=2 --conf spark.executor.memory=4g --conf spark.executor.memoryOverhead=2g}
+  SUBMIT="spark-submit $S3CONF $DRV $SPARK_EXTRA"
   SCORE_SUBMIT="$SUBMIT --conf spark.pyspark.python=/usr/bin/python3 --conf spark.pyspark.driver.python=/usr/bin/python3 --conf spark.executor.memory=5g --conf spark.executor.memoryOverhead=4g"
   done_marker () { aws s3 ls "$P/$1.done" > /dev/null 2>&1; }
   mark_done () { echo done | aws s3 cp - "$P/$1.done" > /dev/null; }
