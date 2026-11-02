@@ -91,8 +91,8 @@ if [ -z "$AML_LOCAL" ]; then
     || { echo "pip install failed (see logs/pip.log)"; exit 1; }
   # 1. raw data from Kaggle
   for D in HI-Small HI-Medium HI-Large; do
-    reuse dl_trans_$D curated/transactions/dataset=$D/
-    reuse dl_patterns_$D curated/schemes/dataset=$D/
+    reuse dl_trans_$D curated/daily_profile/dataset=$D/         # daily_profile: only the team's clean step writes it
+    reuse dl_patterns_$D curated/patterns_dq/dataset=$D/        # patterns_dq: only the team's parser writes it
     reuse dl_accounts_$D raw/accounts/set=$D/        # small; HI-Large's is needed for the new weeks' features
     step dl_trans_$D     download "${D}_Trans.csv"    "$AML_ROOT/raw/transactions/set=$D/${D}_Trans.csv"
     step dl_patterns_$D  download "${D}_Patterns.txt" "$AML_ROOT/raw/patterns/set=$D/${D}_Patterns.txt"
@@ -103,7 +103,7 @@ fi
 # 2. clean + answer key (whole datasets; HI-Large's tail after 5 Nov is cut by the clean step)
 for D in HI-Small HI-Medium HI-Large; do
   reuse clean_$D curated/transactions/dataset=$D/ curated/labels/dataset=$D/ curated/daily_profile/dataset=$D/
-  reuse patterns_$D curated/schemes/dataset=$D/ curated/scheme_txns/dataset=$D/
+  reuse patterns_$D curated/patterns_dq/dataset=$D/ curated/schemes/dataset=$D/ curated/scheme_txns/dataset=$D/
   step clean_$D     $SUBMIT clean_transactions_spark.py $D
   step patterns_$D  $SUBMIT parse_patterns_spark.py $D
 done
