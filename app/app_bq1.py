@@ -41,15 +41,16 @@ tot = d["schemes_total"]
 thr_k = round(frozen["alerts_per_day"])
 
 # ------------------------------------------------------------------ header
-st.title("Catching laundering early, with alerts analysts can handle")
+st.title("Setting alert volumes: what each choice catches, and what it costs analysts")
+st.markdown("**For the Transaction Monitoring Tuning Team**, who decide how many alerts go to analysts each day.")
 st.markdown("**BQ1:** How can we automatically detect laundering patterns early, while keeping false alerts "
             "low enough for analysts to manage?")
-st.caption(f"For the Transaction Monitoring Tuning Team · Tested once on {int(frozen['days'])} unseen days of HI-Large "
+st.caption(f"Tested once on {int(frozen['days'])} unseen days of HI-Large "
            f"({frozen['date_from'][:10]} to {frozen['date_to'][:10]}), {frozen['payments'] / 1e6:.1f}M payments · "
            "trained on HI-Small and HI-Medium only")
 
 # ------------------------------------------------------------------ 1. capacity: the decision
-st.subheader("1 · How many alerts can your analysts review a day?")
+st.subheader("1 · How many alerts should go to analysts each day?")
 st.caption("Each day, accounts are ranked by risk score and the top ones become alerts. "
            "Pick a daily volume to see what it buys.")
 
