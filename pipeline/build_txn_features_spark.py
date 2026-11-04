@@ -138,11 +138,13 @@ def main():
     out = out.fillna(0.0).persist()
 
     sample = out.filter((F.col("label") == 1) | (F.rand(RANDOM_SEED) < NEG_SAMPLE_RATE))
-    sample.repartition("dataset", "week").write.mode("overwrite") \
+    # rebalance, not repartition: by week alone one task wrote each week while the other cores
+    # idled; rebalance lets AQE split big weeks across tasks and merge small ones
+    sample.hint("rebalance", "dataset", "week").write.mode("overwrite") \
           .partitionBy("dataset", "week").parquet(f"{CURATED}/txn_features_sample")
     full_from = FULL_FROM.get(DATASET)
     full = out.filter(F.col("date") >= F.lit(full_from).cast("date")) if full_from else out
-    full.repartition("dataset", "week").write.mode("overwrite") \
+    full.hint("rebalance", "dataset", "week").write.mode("overwrite") \
         .partitionBy("dataset", "week").parquet(f"{CURATED}/txn_features")
 
     n = out.count()
