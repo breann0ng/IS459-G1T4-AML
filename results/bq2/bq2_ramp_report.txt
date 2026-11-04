@@ -1,0 +1,230 @@
+BQ2 · Are criminals changing their laundering tactics over time, and when they do,
+      does our detection rate fall, and can retraining recover it?
+
+Test world: SAML-D (Oztas et al. 2023). Emerging tactics ['Structuring', 'Smurfing', 'Cash_Withdrawal', 'Deposit-Send'] are absent until
+2023-02-27, then switched on gradually [('2023-01-30', 0.0), ('2023-02-27', 0.1), ('2023-03-27', 0.25), ('2023-04-24', 0.5), ('2023-05-22', 1.0)]. SAML-C = control, nothing changes.
+
+Laundering payments by group (SAML-D / ramp / control)
+             payments_saml_d  payments_ramp  payments_control
+group                                                        
+emerging                5081           1898                 0
+established             4792           4792              4792
+
+====================================================================================================
+PART 1 · Are tactics changing? (confirmed cases only, no model)
+changed = js above the noise threshold AND chi-square p < 0.01; tactic change = lasting (2 weeks) and honest payments unchanged
+
+--- SAML-R: laundering
+ dimension  js_threshold  weeks_after  weeks_changed  weeks_tactic_change first_change change_started  max_js_after
+    format         0.191           30             20                   16   2023-03-13     2023-02-27         0.506
+    amount         0.174           30             18                   12   2023-02-20     2023-02-13         0.401
+ cross_ccy         0.100           30              1                    0                                     0.112
+cross_bank         0.170           30              0                    0                                     0.097
+   pattern         0.504           30             14                    8   2023-05-08     2023-02-20         0.739
+      hour         0.119           30              0                    0                                     0.139
+    format: CUSUM dates the shift: Cash from 2023-02-27; Credit Card from 2023-05-08; Cheque from 2023-06-05; ACH from 2023-07-10
+    amount: CUSUM dates the shift: d 2-10 from 2023-02-13; e >10 from 2023-02-27; a <0.1 from 2023-03-06; b 0.1-0.5 from 2023-04-24; c 0.5-2 from 2023-05-15
+    cross_ccy: unconfirmed CUSUM alarms (no lasting change, likely noise): false from 2023-06-12; true from 2023-06-12
+    pattern: CUSUM dates the shift: layered_fan_in from 2023-02-20; stacked_bipartite from 2023-02-20; deposit_send from 2023-02-27; structuring from 2023-02-27; cash_withdrawal from 2023-03-06; smurfing from 2023-03-06
+    honest payments: lasting changes per dimension {'amount': 0, 'format': 0, 'hour': 0, 'cross_ccy': 0, 'cross_bank': 0} (should be 0: the control)
+--- SAML-C: laundering
+ dimension  js_threshold  weeks_after  weeks_changed  weeks_tactic_change first_change change_started  max_js_after
+ cross_ccy         0.100           30              1                    0                                     0.134
+   pattern         0.504           30              0                    0                                     0.482
+    amount         0.175           30              3                    1   2023-02-20     2023-02-13         0.227
+    format         0.191           30              0                    0                                     0.162
+cross_bank         0.170           30              0                    0                                     0.146
+      hour         0.119           30              0                    0                                     0.139
+    pattern: unconfirmed CUSUM alarms (no lasting change, likely noise): layered_fan_in from 2023-02-20; stacked_bipartite from 2023-02-20; scatter_gather from 2023-04-24; layered_fan_out from 2023-05-01; fan_out from 2023-05-29; behavioural_change_b from 2023-07-10
+    amount: CUSUM dates the shift: d 2-10 from 2023-02-13; e >10 from 2023-03-06; c 0.5-2 from 2023-06-05; b 0.1-0.5 from 2023-07-10
+    hour: unconfirmed CUSUM alarms (no lasting change, likely noise): 06-11 from 2023-06-26
+    honest payments: lasting changes per dimension {'hour': 0, 'cross_ccy': 0, 'amount': 0, 'format': 0, 'cross_bank': 0} (should be 0: the control)
+--- HI-Large: laundering
+ dimension  js_threshold  weeks_after  weeks_changed  weeks_tactic_change first_change change_started  max_js_after
+cross_bank           0.1            8              0                    0                                     0.006
+      hour           0.1            8              0                    0                                     0.009
+    format           0.1            8              0                    0                                     0.028
+ cross_ccy           0.1            8              0                    0                                     0.000
+   pattern           0.1            8              0                    0                                     0.065
+    amount           0.1            8              0                    0                                     0.018
+    format: unconfirmed CUSUM alarms (no lasting change, likely noise): ACH from 2022-10-10; Cheque from 2022-10-17
+    pattern: unconfirmed CUSUM alarms (no lasting change, likely noise): gather_scatter from 2022-10-03; bipartite from 2022-10-10; scatter_gather from 2022-10-10; random from 2022-10-17
+    amount: unconfirmed CUSUM alarms (no lasting change, likely noise): d 2-10 from 2022-10-17; e >10 from 2022-10-24
+    honest payments: lasting changes per dimension {'cross_bank': 0, 'hour': 0, 'amount': 0, 'format': 0, 'cross_ccy': 0} (should be 0: the control)
+
+SAML-R pattern mix, week by week after the baseline (js, p, tactic change)
+week_start   n     js    psi  p_value  changed  tactic_change
+2023-01-30  98 0.1878 0.1945   0.1234    False          False
+2023-02-06 136 0.3153 0.6387   0.0000    False          False
+2023-02-13 110 0.4309 1.4425   0.0000    False          False
+2023-02-20 129 0.4655 1.6445   0.0000    False          False
+2023-02-27 130 0.5295 2.2162   0.0000     True          False
+2023-03-06 117 0.4988 1.7955   0.0000    False          False
+2023-03-13 102 0.3383 0.8633   0.0000    False          False
+2023-03-20 114 0.3649 0.8660   0.0000    False          False
+2023-03-27 107 0.3968 1.0873   0.0000    False          False
+2023-04-03 124 0.4232 1.3654   0.0000    False          False
+2023-04-10 167 0.4923 1.9422   0.0000    False          False
+2023-04-17 168 0.4392 1.3888   0.0000    False          False
+2023-04-24 131 0.4887 1.7199   0.0000    False          False
+2023-05-01 152 0.5094 1.8384   0.0000     True          False
+2023-05-08 189 0.6166 3.2883   0.0000     True           True
+2023-05-15 134 0.5020 2.0798   0.0000    False          False
+2023-05-22 135 0.5572 2.5621   0.0000     True          False
+2023-05-29 171 0.3879 1.0772   0.0000    False          False
+2023-06-05 264 0.6957 4.2218   0.0000     True          False
+2023-06-12 292 0.7391 4.8317   0.0000     True           True
+2023-06-19 244 0.5555 2.6099   0.0000     True           True
+2023-06-26 171 0.4418 1.3460   0.0000    False          False
+2023-07-03 231 0.7129 4.5590   0.0000     True          False
+2023-07-10 271 0.6724 4.0150   0.0000     True           True
+2023-07-17 228 0.6747 4.0458   0.0000     True           True
+2023-07-24 175 0.4745 1.7146   0.0000    False          False
+2023-07-31 176 0.5535 2.6124   0.0000     True          False
+2023-08-07 262 0.7352 4.8325   0.0000     True           True
+2023-08-14 326 0.6670 3.8405   0.0000     True           True
+2023-08-21  94 0.5674 2.5178   0.0000     True           True
+
+====================================================================================================
+PART 2 · Is detection affected? (BQ1 recipe trained on SAML-R's first 17 weeks)
+v0: trained 2022-10-07..2023-01-29 (1159 laundering), threshold 0.9968, validation P 0.914 R 0.888 F1 0.901
+v1: trained 2022-10-07..2023-04-09 (1914 laundering), threshold 0.9833, validation P 0.962 R 0.930 F1 0.946
+v2: trained 2022-10-07..2023-05-28 (2539 laundering), threshold 0.8820, validation P 0.959 R 0.953 F1 0.956
+
+recall week by week (all / established / emerging), alerts, v0 rule checks
+            v0 all  v0 emerging  v0 established  v1 all  v1 emerging  v1 established  v2 all  v2 emerging  v2 established  v0 alerts  v1 alerts  v2 alerts  any_rule  alert
+week_start                                                                                                                                                                 
+2023-01-30   0.745          NaN           0.745     NaN          NaN             NaN     NaN          NaN             NaN       79.0        NaN        NaN      True  False
+2023-02-06   0.816          NaN           0.816     NaN          NaN             NaN     NaN          NaN             NaN      116.0        NaN        NaN     False  False
+2023-02-13   0.818          NaN           0.818     NaN          NaN             NaN     NaN          NaN             NaN       98.0        NaN        NaN     False  False
+2023-02-20   0.853          NaN           0.853     NaN          NaN             NaN     NaN          NaN             NaN      115.0        NaN        NaN     False  False
+2023-02-27   0.831        0.412           0.894     NaN          NaN             NaN     NaN          NaN             NaN      114.0        NaN        NaN     False  False
+2023-03-06   0.821        0.360           0.946     NaN          NaN             NaN     NaN          NaN             NaN      100.0        NaN        NaN     False  False
+2023-03-13   0.775        0.333           0.869     NaN          NaN             NaN     NaN          NaN             NaN       82.0        NaN        NaN      True  False
+2023-03-20   0.798        0.167           0.833     NaN          NaN             NaN     NaN          NaN             NaN       95.0        NaN        NaN     False  False
+2023-03-27   0.850        0.200           0.882     NaN          NaN             NaN     NaN          NaN             NaN       93.0        NaN        NaN      True  False
+2023-04-03   0.815        0.533           0.853     NaN          NaN             NaN     NaN          NaN             NaN      108.0        NaN        NaN      True   True
+2023-04-10   0.772        0.460           0.906     NaN          NaN             NaN     NaN          NaN             NaN      131.0        NaN        NaN      True   True
+2023-04-17   0.786        0.444           0.879     NaN          NaN             NaN     NaN          NaN             NaN      134.0        NaN        NaN      True   True
+2023-04-24   0.809        0.481           0.894     NaN          NaN             NaN     NaN          NaN             NaN      108.0        NaN        NaN      True   True
+2023-05-01   0.763        0.385           0.894     NaN          NaN             NaN     NaN          NaN             NaN      118.0        NaN        NaN      True   True
+2023-05-08   0.709        0.474           0.957   0.889        0.794           0.989     NaN          NaN             NaN      138.0      169.0        NaN      True   True
+2023-05-15   0.679        0.240           0.940   0.813        0.540           0.976     NaN          NaN             NaN       97.0      112.0        NaN      True   True
+2023-05-22   0.659        0.250           0.808   0.919        0.722           0.990     NaN          NaN             NaN       89.0      125.0        NaN      True   True
+2023-05-29   0.825        0.522           0.872   0.942        0.696           0.980     NaN          NaN             NaN      143.0      162.0        NaN      True   True
+2023-06-05   0.580        0.383           0.918   0.818        0.713           1.000     NaN          NaN             NaN      158.0      219.0        NaN      True   True
+2023-06-12   0.521        0.357           0.854   0.795        0.694           1.000     NaN          NaN             NaN      153.0      233.0        NaN      True   True
+2023-06-19   0.615        0.300           0.873   0.881        0.736           1.000     NaN          NaN             NaN      150.0      215.0        NaN      True   True
+2023-06-26   0.871        0.429           0.933   0.988        0.905           1.000   1.000        1.000           1.000      150.0      169.0      173.0      True   True
+2023-07-03   0.584        0.434           0.837   0.840        0.745           1.000   0.970        0.952           1.000      136.0      194.0      226.0      True   True
+2023-07-10   0.657        0.481           0.917   0.812        0.698           0.982   0.919        0.864           1.000      180.0      220.0      251.0      True   True
+2023-07-17   0.636        0.533           0.791   0.838        0.737           0.989   0.947        0.912           1.000      148.0      192.0      221.0      True   True
+2023-07-24   0.714        0.383           0.836   0.937        0.830           0.977   0.960        0.915           0.977      127.0      164.0      168.0      True   True
+2023-07-31   0.665        0.315           0.913   0.903        0.767           1.000   0.949        0.877           1.000      118.0      160.0      169.0      True   True
+2023-08-07   0.569        0.395           0.900   0.767        0.645           1.000   0.866        0.797           1.000      150.0      201.0      229.0      True   True
+2023-08-14   0.589        0.362           0.899   0.752        0.569           1.000   0.877        0.787           1.000      193.0      246.0      287.0      True   True
+2023-08-21   0.691        0.333           0.914   0.840        0.583           1.000   0.915        0.778           1.000       65.0       79.0       86.0      True   True
+
+Decision: {
+ "dataset": "SAML-R",
+ "alert": true,
+ "alert_week": "2023-04-03",
+ "rules": [
+  "R2 new typology deposit_send 14/30; smurfing 0/20"
+ ],
+ "known_on": "2023-05-07",
+ "retrain_to": "2023-04-09",
+ "deploy_from": "2023-05-08",
+ "weeks_from_first_dose_to_alert_week": 5.9,
+ "weeks_from_first_dose_to_known": 9.9,
+ "v0_validation_recall": 0.8877284595300261
+}
+
+recall per typology
+version                                    v0                         v1
+period                           after deploy before deploy after deploy
+group       typology                                                    
+emerging    cash_withdrawal             0.000         0.000        0.285
+            deposit_send                0.374         0.477        0.970
+            smurfing                    0.003         0.000        0.444
+            structuring                 0.896         0.739        0.992
+established behavioural_change_a        0.910         0.973        1.000
+            behavioural_change_b        1.000         0.955        1.000
+            bipartite                   0.922         0.859        0.974
+            cycle                       0.699         0.732        0.947
+            fan_in                      0.923         0.893        1.000
+            fan_out                     0.800         0.769        1.000
+            gather_scatter              0.899         0.894        1.000
+            layered_fan_in              0.921         0.882        1.000
+            layered_fan_out             0.879         0.850        0.988
+            over_invoicing              0.818         1.000        1.000
+            scatter_gather              0.896         0.830        1.000
+            single_large                0.726         0.712        0.973
+            stacked_bipartite           0.936         0.919        1.000
+
+====================================================================================================
+ROUND 2 · after retraining: new baselines, keep monitoring
+Part 1 with the new data baseline (weeks with the new tactics fully in): lasting changes after it
+ dimension  js_threshold  baseline_weeks  weeks_after  weeks_tactic_change
+    format         0.279               6            8                    0
+cross_bank         0.100               6            8                    0
+      hour         0.100               6            8                    0
+ cross_ccy         0.100               6            8                    0
+    amount         0.253               6            8                    0
+   pattern         0.520               6            8                    0
+
+Part 2 · v1 checked against v1's own validation
+week_start  recall  r1_recall_drop         r2_new_typology r3_typology_drop  alert
+2023-05-15   0.813            True   cash_withdrawal 19/47                   False
+2023-05-22   0.919           False   cash_withdrawal 20/49                    True
+2023-05-29   0.942           False   cash_withdrawal 20/55                    True
+2023-06-05   0.818            True  cash_withdrawal 33/106                    True
+2023-06-12   0.795            True  cash_withdrawal 53/164                    True
+2023-06-19   0.881           False  cash_withdrawal 72/200                    True
+2023-06-26   0.988           False  cash_withdrawal 74/203                    True
+2023-07-03   0.840           False  cash_withdrawal 88/242                    True
+2023-07-10   0.812            True  cash_withdrawal 96/282                    True
+2023-07-17   0.838           False cash_withdrawal 101/306                    True
+2023-07-24   0.937           False cash_withdrawal 101/310                    True
+2023-07-31   0.903           False cash_withdrawal 108/330                    True
+2023-08-07   0.767            True cash_withdrawal 114/378                    True
+2023-08-14   0.752            True cash_withdrawal 126/439                    True
+2023-08-21   0.840           False cash_withdrawal 128/449                    True
+
+Decision on v1: {
+ "dataset": "SAML-R",
+ "monitored": "v1",
+ "retrain": "v2",
+ "alert": true,
+ "alert_week": "2023-05-22",
+ "rules": [
+  "R2 new typology cash_withdrawal 20/49"
+ ],
+ "known_on": "2023-06-25",
+ "retrain_to": "2023-05-28",
+ "deploy_from": "2023-06-26",
+ "weeks_from_first_dose_to_alert_week": 12.9,
+ "weeks_from_first_dose_to_known": 16.9,
+ "v1_validation_recall": 0.929559748427673
+}
+
+recall per typology after v2 went live (v1 vs v2, same weeks)
+version                              v1     v2
+group       typology                          
+emerging    cash_withdrawal       0.225  0.675
+            deposit_send          0.968  1.000
+            smurfing              0.346  0.648
+            structuring           0.992  1.000
+established behavioural_change_a  1.000  1.000
+            behavioural_change_b  1.000  1.000
+            bipartite             0.968  1.000
+            cycle                 0.959  0.980
+            fan_in                1.000  1.000
+            fan_out               1.000  1.000
+            gather_scatter        1.000  1.000
+            layered_fan_in        1.000  1.000
+            layered_fan_out       0.981  0.990
+            over_invoicing        1.000  1.000
+            scatter_gather        1.000  1.000
+            single_large          0.973  0.973
+            stacked_bipartite     1.000  1.000
