@@ -8,7 +8,7 @@ aws:
 
 emr_serverless:
   application_id: 00ga27nqsrmqmp09
-  release: emr-spark-8.0
+  release: emr-spark-8.0.0
   architecture: x86_64
   java: 17
   job_role: aml-emr-serverless-job  # IAM role the jobs run as (S3 + Glue)

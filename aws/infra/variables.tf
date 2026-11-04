@@ -16,7 +16,7 @@ variable "emr_application_id" {
 
 variable "emr_release_label" {
   type        = string
-  default     = "emr-spark-8.0"
+  default     = "emr-spark-8.0.0"
   description = "Check with: aws emr-serverless get-application --application-id <id> --query application.releaseLabel"
 }
 
