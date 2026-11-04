@@ -11,4 +11,4 @@ docker run --rm -v "$PWD":/out amazonlinux:2023 bash -c "
   python3 -m venv /venv && source /venv/bin/activate &&
   pip install -q -r /out/requirements-jobs.txt venv-pack &&
   venv-pack -f -o /out/venv.tar.gz"
-aws s3 cp venv.tar.gz "s3://$BUCKET/code/venv.tar.gz"
+aws s3 cp venv.tar.gz "s3://$BUCKET/jobs/venv.tar.gz"

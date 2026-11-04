@@ -9,7 +9,7 @@ Details and results: [`docs/bq1.md`](docs/bq1.md) · [`docs/bq2.md`](docs/bq2.md
 
 ```
 aws/                      ★ DEPLOYED TO AWS
-  jobs/                     code -> s3://<bucket>/code/, runs on EMR Serverless
+  jobs/                     code -> s3://<bucket>/jobs/, runs on EMR Serverless
     load/                     load_kaggle.sh · saml_ramp_spark.py              -> raw/
     clean/                    clean_transactions_spark.py · parse_patterns_spark.py -> curated/
     features/                 build_features_spark.py · build_txn_features_spark.py · build_features_v3_spark.py
@@ -34,7 +34,7 @@ docs/                     ✗ bq1.md · bq2.md · improving_bq1.md · figures/
 
 | Folder | Deployed to | How | Owner |
 |---|---|---|---|
-| `aws/jobs/` | `s3://<bucket>/code/` -> EMR Serverless | `aws/deploy/deploy.sh` (from `main` only) | persons 2-4 write, person 1 deploys |
+| `aws/jobs/` | `s3://<bucket>/jobs/` -> EMR Serverless | `aws/deploy/deploy.sh` (from `main` only) | persons 2-4 write, person 1 deploys |
 | `aws/sql/` | Athena + Glue Data Catalog | Terraform / Step Functions | person 5 |
 | `aws/step-functions/` | Step Functions | Terraform | person 5 writes, person 1 applies |
 | `aws/infra/` | every AWS resource | `terraform apply` | person 1 |
@@ -44,7 +44,7 @@ docs/                     ✗ bq1.md · bq2.md · improving_bq1.md · figures/
 ## S3 bucket (data, never code you edit)
 
 ```
-code/  staging/  raw/ (bronze)  curated/ (silver)  features/ (gold, ML)  analytics/ (gold)
+jobs/  staging/  raw/ (bronze)  curated/ (silver)  features/ (gold, ML)  analytics/ (gold)
 models/ (trained model files)  mlflow/  logs/  athena-results/
 ```
 

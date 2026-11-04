@@ -4,7 +4,7 @@
 aws:
   region: us-east-1                 # same region as the bucket; never mix regions (a mismatch once broke stage 2)
   bucket: is459-g1t4-aml            # bucket NAME only (no s3://); scripts read AML_ROOT=s3://<bucket>
-  code_prefix: code/                # aws/deploy/deploy.sh uploads aws/jobs/ here
+  code_prefix: jobs/                # deploy.sh uploads aws/jobs/ here (+ jobs.zip, venv.tar.gz)
 
 emr_serverless:
   application_id: 00ga27nqsrmqmp09
