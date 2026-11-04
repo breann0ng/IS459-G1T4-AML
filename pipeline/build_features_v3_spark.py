@@ -66,6 +66,10 @@ SRC_FEATURES, SRC_TXN = "features_v2", "txn_features"
 OUT_FEATURES, OUT_TXN = "features_v3", "txn_features_v3"
 HISTORY_DAYS = 14
 SHUFFLE_PARTITIONS = int(os.environ.get("AML_SHUFFLE", 400))
+# Send the (narrow) accounts table to every executor instead of shuffling the big tables to it:
+# saves a shuffle of the account-days and two of the payments. ~2.1M accounts on HI-Medium /
+# HI-Large; set AML_BROADCAST_ACCOUNTS=0 if executors run out of memory.
+BROADCAST_ACCOUNTS = os.environ.get("AML_BROADCAST_ACCOUNTS", "1") == "1"
 
 CURATED = f"{ROOT}/curated"
 DAY = 86400
@@ -167,13 +171,13 @@ def main():
           .withColumn("_a3", F.sum(F.col("n_out") + F.col("n_in")).over(w.rangeBetween(-2, 0)))
           .withColumn("_a11", F.sum(F.col("n_out") + F.col("n_in")).over(w.rangeBetween(-13, -3)))
           .withColumn("x_trend", (F.col("_a3") / 3) / ((F.coalesce("_a11", F.lit(0)) + 1) / 11)))
-    # owner activity today: how many of the owner's accounts were active
-    d = d.join(acc.select("acct", "owner"), "acct", "left")
+    # owner columns in ONE join (was two), then: how many of the owner's accounts were active today
+    small = F.broadcast if BROADCAST_ACCOUNTS else (lambda df: df)
+    o_cols = ["o_n_accounts", "o_n_banks", "o_bank_size", "o_crypto_bank"] + [f"o_type_{k}" for k in OWNER_TYPES]
+    d = d.join(small(acc.select("acct", "owner", *o_cols)), "acct", "left")
     own_day = d.filter(F.col("owner").isNotNull()).groupBy("owner", "date").agg(
         F.countDistinct("acct").alias("o_owner_active_accts"))
     d = d.join(own_day, ["owner", "date"], "left")
-    o_cols = ["o_n_accounts", "o_n_banks", "o_bank_size", "o_crypto_bank"] + [f"o_type_{k}" for k in OWNER_TYPES]
-    d = d.join(acc.select("acct", *o_cols), "acct", "left")
     fill = {"x_out_spike": -1.0, "x_in_spike": -1.0, "x_amt_out_vs_own": 0.0, "x_amt_in_vs_own": 0.0,
             "x_days_since_prev": 99.0, "x_active_prev14": 0.0, "x_trend": 0.0,
             "x_new_cp_out": -1.0, "x_new_cp_in": -1.0, "o_owner_active_accts": 0.0}
@@ -190,7 +194,8 @@ def main():
         f = in_chunk(spark.read.parquet(f"{CURATED}/{src_t}").filter(F.col("dataset") == DATASET))
         f = f.join(extras, ["acct_bank", "acct", "date"], "left").fillna(
             {c: v for c, v in fill.items()})
-        f.repartition("dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
+        # rebalance: AQE splits big weeks across tasks and merges small ones
+        f.hint("rebalance", "dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
          .parquet(f"{CURATED}/{out_t}")
     chunk = f" {CHUNK_FROM} to {CHUNK_TO}" if CHUNK_FROM else ""
     print(f"[v3] {DATASET}{chunk}: wrote {OUT_FEATURES} (+_sample): {SRC_FEATURES} + {len(extra_cols)} columns")
@@ -202,7 +207,7 @@ def main():
     a_r = acc.select(F.col("acct").alias("dst"), F.col("owner").alias("r_owner"), F.col("bank_country").alias("r_ctry"))
     p = (t.withColumn("_s_avg", F.avg("lp").over(sw)).withColumn("_s_n", F.count(F.lit(1)).over(sw))
           .withColumn("_r_avg", F.avg("lr").over(rw))
-          .join(a_s, "src", "left").join(a_r, "dst", "left")
+          .join(small(a_s), "src", "left").join(small(a_r), "dst", "left")
           .select("txn_id",
                   ((F.col("s_owner") == F.col("r_owner")) & ~F.col("is_self_transfer")).cast("float").alias("t_same_owner"),
                   (F.col("s_ctry") != F.col("r_ctry")).cast("float").alias("t_cross_country"),
@@ -222,7 +227,7 @@ def main():
         q = (q.join(p, "txn_id", "left").join(sx, ["s_id", "date"], "left").join(rx, ["r_id", "date"], "left")
               .fillna({**sfill, "t_same_owner": 0.0, "t_cross_country": 0.0, "t_amt_vs_sender": 0.0,
                        "t_amt_vs_receiver": 0.0, "t_sender_new": 0.0}))
-        q.repartition("dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
+        q.hint("rebalance", "dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
          .parquet(f"{CURATED}/{out_t}")
     n_same = p.filter("t_same_owner = 1").count()
     print(f"[v3] {DATASET}{chunk}: wrote {OUT_TXN} (+_sample): {SRC_TXN} + 5 payment + {2 * len(extra_cols)} "

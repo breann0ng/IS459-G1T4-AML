@@ -1,0 +1,141 @@
+
+=================== HI-Small
+  old    = main @ 9387020
+  new    = working tree @ c406fcf + uncommitted changes
+  new2   = working tree @ c406fcf + uncommitted changes · cycle tie-break by last payment id + rebalance writes
+runs per step: 2 to 3 (median shown); runs left out: {'slept': 5} (FAILED, or a status set by hand in index.tsv, e.g. slept)
+
+PER STEP (old | new | new2)
+                                  wall_s                   actions             stages               shuffles               shuffle_mb                     file_read_mb                   spill_mb                   core_use            
+version                              old      new     new2     old   new  new2    old    new   new2      old    new   new2        old       new      new2          old      new     new2      old      new     new2      old   new  new2
+step                                                                                                                                                                                                                                    
+clean                             176.47    86.47    92.08    10.0  10.0  10.0   32.0   30.0   32.0     17.0   15.0   17.0    2569.67   1935.40   1938.53       907.26   453.63   453.63   370.54   264.93     0.00     0.71  0.78  0.80
+patterns                           14.33    12.78    16.92     7.0   7.0   7.0   34.0   34.0   34.0     18.0   18.0   18.0       2.55      2.73      2.55      1431.56  1422.47  1427.47     0.00     0.00     0.00     0.23  0.30  0.27
+features_v2                       866.91   958.60   904.32     6.0   6.0   6.0  158.0  158.0  158.0     89.0   89.0   89.0   11263.93  12010.30  11748.89      1733.09  1724.01  1729.01  2478.75  3792.12  3244.51     0.91  0.93  0.92
+txn_features                      163.47   213.60   198.55     4.0   4.0   4.0   25.0   25.0   25.0     14.0   14.0   14.0    6394.97   6394.53   6402.24      1367.58  1397.01  1367.40  1882.40  2013.27  1900.70     0.75  0.82  0.86
+features_v3                       253.14   233.98   237.68    10.0  10.0  10.0   80.0   74.0   74.0     55.0   46.0   46.0    7041.85   5865.60   5973.07      2019.67  2043.09  2021.22    99.86   836.31   874.26     0.57  0.61  0.66
+TOTAL (steps every version ran)  1474.33  1505.43  1449.54    37.0  37.0  37.0  329.0  321.0  323.0    193.0  182.0  184.0   27272.97  26208.57  26065.28      7459.16  7040.21  6998.73  4831.55  6906.63  6019.47      NaN   NaN   NaN
+
+CHANGE new vs old (% for sizes and time, difference for counts; negative = new does less)
+                                 wall_s %  shuffle_mb %  file_read_mb %  spill_mb %  actions  stages  shuffles  core_use
+step                                                                                                                    
+clean                               -51.0         -24.7           -50.0       -28.5      0.0    -2.0      -2.0      0.06
+patterns                            -10.8           6.9            -0.6         NaN      0.0     0.0       0.0      0.07
+features_v2                          10.6           6.6            -0.5        53.0      0.0     0.0       0.0      0.02
+txn_features                         30.7          -0.0             2.2         7.0      0.0     0.0       0.0      0.07
+features_v3                          -7.6         -16.7             1.2       737.5      0.0    -6.0      -9.0      0.04
+TOTAL (steps every version ran)       2.1          -3.9            -5.6        42.9      0.0    -8.0     -11.0       NaN
+
+CHANGE new2 vs old (% for sizes and time, difference for counts; negative = new2 does less)
+                                 wall_s %  shuffle_mb %  file_read_mb %  spill_mb %  actions  stages  shuffles  core_use
+step                                                                                                                    
+clean                               -47.8         -24.6           -50.0      -100.0      0.0     0.0       0.0      0.09
+patterns                             18.0          -0.0            -0.3         NaN      0.0     0.0       0.0      0.04
+features_v2                           4.3           4.3            -0.2        30.9      0.0     0.0       0.0      0.01
+txn_features                         21.5           0.1            -0.0         1.0      0.0     0.0       0.0      0.11
+features_v3                          -6.1         -15.2             0.1       775.5      0.0    -6.0      -9.0      0.09
+TOTAL (steps every version ran)      -1.7          -4.4            -6.2        24.6      0.0    -6.0      -9.0       NaN
+
+EVERY RUN · wall_s (spread between runs of the same code = timing noise)
+version         old                         new                  new2        
+run               1      2      3      4      1      2       4      5       6
+step                                                                         
+clean         219.0  133.0      -      -  100.0   73.0       -   87.0    97.0
+patterns       14.0   14.0      -      -   13.0   13.0       -   15.0    19.0
+features_v2       -  993.0  741.0      -      -  901.0  1016.0  798.0  1011.0
+txn_features      -  184.0  150.0  163.0      -  229.0   198.0  190.0   207.0
+features_v3       -  271.0  235.0      -      -  254.0   213.0  238.0   237.0
+
+ACTIONS per step (from each version's first run)
+  clean        old  : count x3, first, showString, write daily_profile, write dq_report, write labels, write quarantine, write transactions
+  clean        new  : count x3, first, showString, write daily_profile, write dq_report, write labels, write quarantine, write transactions
+  clean        new2 : count x3, first, showString, write daily_profile, write dq_report, write labels, write quarantine, write transactions
+  patterns     old  : collect, count x3, write patterns_dq, write scheme_txns, write schemes
+  patterns     new  : collect, count x3, write patterns_dq, write scheme_txns, write schemes
+  patterns     new2 : collect, count x3, write patterns_dq, write scheme_txns, write schemes
+  features_v2  old  : collect x2, first x2, write features_v2, write features_v2_sample
+  features_v2  new  : collect x2, first x2, write features_v2, write features_v2_sample
+  features_v2  new2 : collect x2, first x2, write features_v2, write features_v2_sample
+  txn_features old  : count x2, write txn_features, write txn_features_sample
+  txn_features new  : count x2, write txn_features, write txn_features_sample
+  txn_features new2 : count x2, write txn_features, write txn_features_sample
+  features_v3  old  : collect, count x2, csv x2, first, write features_v3, write features_v3_sample, write txn_features_v3, write txn_features_v3_sample
+  features_v3  new  : collect, count x2, csv x2, first, write features_v3, write features_v3_sample, write txn_features_v3, write txn_features_v3_sample
+  features_v3  new2 : collect, count x2, csv x2, first, write features_v3, write features_v3_sample, write txn_features_v3, write txn_features_v3_sample
+
+SLOWEST 3 STAGES per step (each version's first run; stage / job / sql ids as in the Spark UI)
+-- clean · old
+ stage  job  sql             action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+     6    4  1.0 write transactions     10       43.12      931.85       0.0      0.00
+     9    5  1.0 write transactions    200       39.03        0.00       0.0      0.00
+    16    7  1.0 write transactions      2       34.71        0.00       0.0    370.54
+-- clean · new
+ stage  job  sql             action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+     6    4  1.0 write transactions    200       28.53         0.0      0.00      0.00
+     0    0  0.0              first      8       18.74         0.0    454.39      0.00
+    11    6  1.0 write transactions     10       12.58         0.0      0.00    264.93
+-- clean · new2
+ stage  job  sql             action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+     6    4  1.0 write transactions    200       24.93         0.0      0.00       0.0
+     0    0  0.0              first      8       15.49         0.0    454.39       0.0
+    11    6  1.0 write transactions     13       12.13         0.0      0.00       0.0
+-- patterns · old
+ stage  job  sql            action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+    34   21  4.0     write schemes      8        1.93         0.2      0.09       0.0
+     9    7  1.0             count      8        1.87         0.2      0.09       0.0
+    53   30  5.0 write scheme_txns      8        1.48         0.2      0.09       0.0
+-- patterns · new
+ stage  job  sql        action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+     9    7  1.0         count     10        1.49        0.26      0.09       0.0
+    34   21  4.0 write schemes     10        1.44        0.26      0.09       0.0
+     0    0  0.0         count      1        1.42        0.00      0.31       0.0
+-- patterns · new2
+ stage  job  sql        action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+     9    7  1.0         count     12        1.99         0.2      0.10       0.0
+     0    0  0.0         count      1        1.25         0.0      0.31       0.0
+    34   21  4.0 write schemes     12        1.06         0.2      0.10       0.0
+-- features_v2 · old
+ stage  job  sql            action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+   235  124  2.0 write features_v2     12      287.43       37.61      0.00    121.14
+   227  122  2.0 write features_v2     26      277.70      108.09    377.87      0.00
+   224  121  2.0 write features_v2     12      276.32       40.08      0.00    121.14
+-- features_v2 · new
+ stage  job  sql            action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+   235  125  2.0 write features_v2     12      290.44       37.61      0.00    121.14
+   245  130  2.0 write features_v2     16      274.70      595.04    268.42   1473.78
+   219  121  2.0 write features_v2     26      271.25      109.26    377.87      0.00
+-- features_v2 · new2
+ stage  job  sql            action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+   237  125  2.0 write features_v2     12      263.03       37.61      0.00    121.14
+   232  124  2.0 write features_v2     26      238.92      108.09    377.87      0.00
+   229  123  2.0 write features_v2     12      236.28       40.08      0.00    123.20
+-- txn_features · old
+ stage  job  sql                    action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+    43   16  0.0 write txn_features_sample     16       53.33        0.00       0.0   1872.07
+    81   20  1.0        write txn_features      1       26.50        0.00       0.0      0.00
+    34   15  0.0 write txn_features_sample     16       24.72     1881.57       0.0      0.00
+-- txn_features · new
+ stage  job  sql                    action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+    43   16  0.0 write txn_features_sample     16      101.55        0.00       0.0   1887.58
+    34   15  0.0 write txn_features_sample     16       23.07     1881.74       0.0      0.00
+    81   20  1.0        write txn_features      2       21.61        0.00       0.0      0.00
+-- txn_features · new2
+ stage  job  sql                    action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+    43   16  0.0 write txn_features_sample     16       75.87        0.00       0.0   1898.14
+    34   15  0.0 write txn_features_sample     16       19.83     1881.74       0.0      0.00
+    81   20  1.0        write txn_features      8       13.64        0.00       0.0      0.00
+-- features_v3 · old
+ stage  job  sql                action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+   251   58  7.0 write txn_features_v3     16       80.56      477.22      0.00       0.0
+    59   34  5.0     write features_v3     16       21.34       96.13   1026.86       0.0
+   396   68  7.0 write txn_features_v3      1       20.19        0.00      0.00       0.0
+-- features_v3 · new
+ stage  job  sql                action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+   149   54  7.0 write txn_features_v3     16       85.78      477.22      0.00      0.00
+   212   62  7.0 write txn_features_v3      2       20.85        0.00      0.00    150.85
+   160   57  7.0 write txn_features_v3     16       17.04      122.79     94.95      0.00
+-- features_v3 · new2
+ stage  job  sql                action  tasks  duration_s  shuffle_mb  input_mb  spill_mb
+   149   54  7.0 write txn_features_v3     16       76.27      477.22       0.0      0.00
+    67   36  5.0     write features_v3     11       15.40      180.74       0.0      6.51
+   109   43  5.0     write features_v3      9       14.60        0.00       0.0    167.08

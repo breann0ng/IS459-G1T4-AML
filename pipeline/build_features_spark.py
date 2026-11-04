@@ -357,7 +357,12 @@ def cycle_features(small):
                           F.col("p.first_ts").alias("first_ts"), F.col("e.ts").alias("last_ts"),
                           F.concat("p.nodes", F.array("e.dst")).alias("nodes"),
                           F.concat("p.txns", F.array("e.txn_id")).alias("txns")))
-            earliest = Window.partitionBy("start", "first_ts", "cur").orderBy("last_ts")
+            # ties (same minute) broken by the last payment's id, so the result never depends on
+            # row order / partition layout: paths that also tie on it end with the same payment,
+            # so they visit the same accounts (all the loop count uses). One id sorts far cheaper
+            # than all of them joined (that spilled ~1.3 GB more on HI-Small).
+            earliest = (Window.partitionBy("start", "first_ts", "cur")
+                              .orderBy("last_ts", F.element_at("txns", -1)))
             P = P.withColumn("_n", F.row_number().over(earliest)).filter("_n = 1").drop("_n")
     # Repeat payments between the same accounts form many copies of one loop: count each
     # distinct set of accounts once per day.
@@ -417,7 +422,9 @@ def main():
         if USE_CYCLES:
             feats = feats.join(cycle_features(small), ["acct", "date"], "left")
             feats = feats.fillna(0, subset=["cycles_today"])
-            first_date = feats.select(F.min("date")).first()[0]
+            # from the cached daily table (same dates as feats): asking feats itself ran the
+            # whole uncached feature plan once extra just to find this date
+            first_date = daily.select(F.min("date")).first()[0]
             last7 = (Window.partitionBy("acct").orderBy(F.datediff("date", F.lit(first_date)))
                            .rangeBetween(-6, 0))
             feats = feats.withColumn("cycles_7d", F.sum("cycles_today").over(last7))
@@ -447,10 +454,12 @@ def main():
     features = features.persist(DISK)
 
     path = f"{CURATED}/{FEATURES_TABLE}"
-    features.repartition("dataset", "week").write.mode("overwrite") \
+    # rebalance, not repartition: by week alone one task wrote each week while the other cores
+    # idled; rebalance lets AQE split big weeks across tasks and merge small ones
+    features.hint("rebalance", "dataset", "week").write.mode("overwrite") \
             .partitionBy("dataset", "week").parquet(path)
     sample = features.filter((F.col("label") == 1) | (F.rand(RANDOM_SEED) < NEG_SAMPLE_RATE))
-    sample.repartition("dataset", "week").write.mode("overwrite") \
+    sample.hint("rebalance", "dataset", "week").write.mode("overwrite") \
           .partitionBy("dataset", "week").parquet(f"{CURATED}/{FEATURES_TABLE}_sample")
 
     by_label = {r["label"]: r["count"] for r in features.groupBy("label").count().collect()}

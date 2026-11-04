@@ -2,9 +2,8 @@
 # EMR bootstrap action: runs on EVERY node (primary + core) when the cluster starts,
 # so the Spark executors can import lightgbm / pandas / pyarrow for scoring.
 set -e
-sudo python3 -m pip install -q pandas pyarrow numpy scikit-learn lightgbm networkx xxhash
-# pip replaces the system python3-dateutil that the AWS CLI imports; put the system copy back
-sudo dnf reinstall -y -q python3-dateutil || sudo dnf install -y -q python3-dateutil || true
-/usr/bin/python3 -c "import dateutil" || sudo /usr/bin/python3 -m pip install -q python-dateutil
+# --ignore-installed: install into /usr/local WITHOUT uninstalling the OS copies in /usr/lib
+# (pip upgrading python-dateutil removed the OS copy and broke EMR's own `aws` CLI, which only
+# reads /usr/lib); dateutil < 3: the aws CLI on EMR 8 requires <= 2.9
+sudo python3 -m pip install -q --ignore-installed pandas pyarrow numpy scikit-learn lightgbm networkx xxhash "python-dateutil<3"
 python3 -c "import lightgbm, pyarrow, pandas; print('libs ok', lightgbm.__version__, pyarrow.__version__)"
-aws s3 ls > /dev/null && echo "aws cli ok" || echo "aws cli broken: run sudo dnf reinstall -y python3-dateutil"
