@@ -22,7 +22,7 @@ import pandas as pd
 
 import txn_report as R
 
-OUT = Path(__file__).resolve().parent.parent / "app" / "data" / "stage2_data.json"
+OUT = Path(__file__).resolve().parents[2] / "app" / "data" / "stage2_data.json"
 
 
 def records(df):

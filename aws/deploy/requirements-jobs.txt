@@ -1,0 +1,9 @@
+# Libraries the EMR Serverless jobs need (packed into venv.tar.gz by build_venv.sh).
+# After the first build that works, replace with exact versions from `pip freeze` so every run is identical.
+pandas
+pyarrow
+numpy
+scikit-learn
+lightgbm
+networkx
+xxhash

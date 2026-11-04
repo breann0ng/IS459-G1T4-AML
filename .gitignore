@@ -19,3 +19,10 @@ analytics_backup/
 models_backup/
 *.log
 logs/
+
+# macOS / local
+.DS_Store
+build/
+Claude outputs/
+data/perf/
+aws/deploy/venv.tar.gz

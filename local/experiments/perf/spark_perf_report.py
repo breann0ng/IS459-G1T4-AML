@@ -29,7 +29,7 @@ from collections import Counter, defaultdict
 
 import pandas as pd
 
-EVENTLOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "perf", "eventlogs")
+EVENTLOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data", "perf", "eventlogs")
 STEPS = ["clean", "patterns", "features_v2", "txn_features", "features_v3"]
 MB = 1024 * 1024
 SLOWEST = 3

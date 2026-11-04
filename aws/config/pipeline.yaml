@@ -1,0 +1,44 @@
+# One place for every setting the AWS pipeline needs. Step Functions passes these to the jobs as
+# arguments / environment; until then they document what legacy-emr/rebuild_final.sh did by hand.
+
+aws:
+  region: ap-southeast-2            # pin it: a us-east-1 default once broke stage 2 against the Sydney bucket
+  bucket: pw-aml-g1t4               # set to the team bucket; every script reads AML_ROOT=s3://<bucket>
+  code_prefix: code/                # aws/deploy/deploy.sh uploads aws/jobs/ here
+
+lake:                               # medallion layers (S3 prefixes)
+  bronze: raw/                      # plain files, never edited
+  staging: staging/                 # daily files waiting for local/simulate/replay_day.py
+  silver: curated/                  # Iceberg (after the port)
+  gold_features: features/          # Iceberg (after the port; today the feature tables are still in curated/)
+  gold_analytics: analytics/        # Iceberg: alerts, metrics, bq2r_*, pipeline_runs (run log)
+  models: models/                   # trained model FILES (not code)
+  logs: logs/                       # Spark event logs, 90-day expiry
+  athena_results: athena-results/   # Athena query output, 7-day expiry
+
+datasets:
+  train: [HI-Small, HI-Medium]
+  test: HI-Large
+  test_window: {from: 2022-09-12, to: 2022-09-25}
+  lookback_days: 21                 # history each daily/chunked run reads before its first day
+
+bq1:
+  final_run_name: final             # leave AML_FINAL_RUN unset -> models/final/ (BQ2 reads models/final/meta.json)
+  # stage 1: En Rui's txn_v3m + alert expansion (was experiments/er_round3.sh)
+  stage1_config: txn_v3m_xp
+  stage1_cmd: >-
+    train_txn.py --txn-table txn_features_v3 --stage2-features features_v3
+    --preset p3 --merge-layering --expand auto --config txn_v3m_xp
+  # stage 2: context + group vote + Breann's longer cross-day linking (was experiments/er_round4.sh)
+  stage2_config: enrui_breann_mld20
+  stage2_cmd: >-
+    group_stage2.py txn_v3m_xp --link-days 3 --param n_estimators=800 --param learning_rate=0.03
+    --keep-rates 1,0.7,0.5,0.3 --context --group-vote --max-linked-days 20
+    --out-config enrui_breann_mld20
+  final_train_cmd: final_train.py txn_v3m_xp enrui_breann_mld20_grp
+  baselines: false                  # logreg + shape-rule namers: experiments only (--baselines)
+
+bq2:
+  datasets: {ramp: SAML-R, control: SAML-C}
+  settings_file: aws/jobs/bq2/bq2_common.py   # typologies, doses, dates, alert rules
+  model_recipe: models/final/meta.json        # BQ2 retrains with BQ1's frozen recipe

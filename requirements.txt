@@ -1,8 +1,0 @@
-# laptop: reports + Streamlit app
-pandas
-pyarrow
-numpy
-streamlit
-altair
-awscli
-# cluster nodes get their libraries from pipeline/install_libs.sh (EMR bootstrap action)

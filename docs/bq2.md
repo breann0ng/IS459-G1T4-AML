@@ -1,5 +1,7 @@
 # IS459 G1T4 · BQ2: Are criminals changing their tactics, and is detection affected?
 
+> **Layout note (all-combined):** paths below are from the old EMR layout. `pipeline/` and `bq2/` scripts now live in `aws/jobs/<load|clean|features|bq1|bq2>/`, reports in `local/reports/`, run scripts in `local/legacy-emr/`. To run the legacy EMR scripts, copy `aws/jobs/*/*` and `local/legacy-emr/*` into one folder on the primary node (`aws/deploy/deploy.sh` builds exactly that flat folder in `build/jobs/`). See the root README.
+
 **BQ2:** Are criminals changing their laundering tactics over time, and when they do, does our detection rate fall, and can retraining recover it?
 
 ## Design

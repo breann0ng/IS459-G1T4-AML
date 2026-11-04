@@ -1,0 +1,7 @@
+# Streamlit app + laptop reports (Streamlit Community Cloud reads this file next to the app)
+pandas
+pyarrow
+numpy
+streamlit
+altair
+awscli

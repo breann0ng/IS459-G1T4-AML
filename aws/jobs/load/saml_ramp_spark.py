@@ -51,6 +51,8 @@ from pyspark.sql import functions as F
 BUCKET = "pw-aml-g1t4"
 ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")
 SRC = f"{ROOT}/raw/saml/SAML-D.csv"
+import os as _os, sys as _sys                # repo layout: bq2_common.py is in aws/jobs/bq2/
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "bq2"))
 import bq2_common as C     # emerging typologies, dates and doses are set in bq2_common.py
 RAMP, CONTROL, EMERGING, TRAIN_TO, DOSES = C.RAMP, C.CONTROL, C.EMERGING, C.TRAIN_TO, C.DOSES
 # =========================================================================================
