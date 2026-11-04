@@ -20,23 +20,9 @@ resource "aws_budgets_budget" "monthly" {
   }
 }
 
-# The same limit inside CloudWatch, next to the pipeline's logs and alarms. No alarm_actions:
-# it only turns "In alarm" on the CloudWatch console, nobody is emailed.
-# One-time prerequisite (account setting, not Terraform): Billing console > Billing preferences >
-# "Receive CloudWatch billing alerts" ON. Billing metrics exist only in us-east-1 (our region).
-resource "aws_cloudwatch_metric_alarm" "estimated_charges" {
-  alarm_name          = "aml-estimated-charges-over-budget"
-  alarm_description   = "Month-to-date AWS charges passed the project budget (tracking only, no actions)"
-  namespace           = "AWS/Billing"
-  metric_name         = "EstimatedCharges"
-  dimensions          = { Currency = "USD" }
-  statistic           = "Maximum"
-  period              = 21600 # billing data updates a few times a day
-  evaluation_periods  = 1
-  comparison_operator = "GreaterThanThreshold"
-  threshold           = var.budget_limit_usd
-  treat_missing_data  = "notBreaching"
-}
+# No CloudWatch billing alarm: this is a linked (member) account, and only the payer account can
+# turn on CloudWatch billing metrics. Cost is tracked in AWS Budgets + Cost Explorer + per-run cost
+# in the run log; CloudWatch is used for pipeline logs, metrics and alarms.
 
 # Cost Anomaly Detection: new accounts usually get a default services monitor already (Billing console).
 # Not managed here because an account allows only one services monitor.
