@@ -106,14 +106,30 @@ def put_text(uri, body):
 
 
 def save(df, name):
+    """Small pandas table -> Parquet under analytics/<name>/dataset=<DATASET>/ (for Athena), written with
+    pyarrow: Spark cannot infer a type for a column that is empty in every row (e.g. no alarms)."""
     if df.empty:
         return
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import pyarrow.fs as pafs
     out = df.copy()
     for c in out.columns:
-        if out[c].dtype == object:
-            out[c] = out[c].astype(str)
-    spark.createDataFrame(out.assign(dataset=DATASET).replace({np.nan: None})) \
-         .write.mode("overwrite").partitionBy("dataset").parquet(f"{ANALYTICS}/{name}")
+        if out[c].dtype == object:     # mixed / None values -> text, keeping missing as null
+            out[c] = out[c].map(lambda v: None if v is None or (isinstance(v, float) and math.isnan(v)) else str(v))
+    t = pa.Table.from_pandas(out, preserve_index=False)
+    t = t.cast(pa.schema([pa.field(f.name, pa.string() if pa.types.is_null(f.type) else f.type) for f in t.schema]))
+    uri = f"{ANALYTICS}/{name}/dataset={DATASET}"
+    if uri.startswith("s3://"):
+        fs, path = pafs.S3FileSystem(region=os.environ.get("AWS_REGION", "us-east-1")), uri[5:]
+    else:
+        fs, path = pafs.LocalFileSystem(), os.path.abspath(uri)
+    try:
+        fs.delete_dir_contents(path, missing_dir_ok=True)
+    except Exception:
+        pass
+    fs.create_dir(path, recursive=True)
+    pq.write_table(t, f"{path}/part-0.parquet", filesystem=fs)
 
 
 def psi(cur, base, eps=1e-4):
@@ -454,10 +470,7 @@ def main():
             f"(known {r['falling_behind_known_week']}, {r['falling_behind_signal']}); first early warning "
             f"week {r['early_warning_week']} ({r['early_warning_signal']}); lead time {r['lead_time_weeks']}")
 
-    # ================================================================== save
-    for df, name in [(tactics, "bq2_tactics"), (shift, "bq2_tactics_shift"), (card, "bq2_scorecard"),
-                     (scheme_card, "bq2_scheme_card"), (drift, "bq2_drift"), (alarms, "bq2_alarms")]:
-        save(df, name)
+    # ================================================================== save (JSON first, then tables)
 
     def rec(df):
         return json.loads(df.to_json(orient="records", date_format="iso"))
@@ -472,6 +485,12 @@ def main():
            "scorecard": rec(card), "scheme_card": rec(scheme_card), "drift": rec(drift),
            "alarms": rec(alarms), "headline": rec(headline)}
     put_text(f"{ANALYTICS}/bq2/{DATASET}.json", json.dumps(out, default=str))
+    for df, name in [(tactics, "bq2_tactics"), (shift, "bq2_tactics_shift"), (card, "bq2_scorecard"),
+                     (scheme_card, "bq2_scheme_card"), (drift, "bq2_drift"), (alarms, "bq2_alarms")]:
+        try:
+            save(df, name)
+        except Exception as e:                     # the JSON (dashboard + report) is already saved
+            log(f"WARNING: could not write analytics/{name} ({e}); the JSON results are saved")
     log(f"saved analytics/bq2_* tables and analytics/bq2/{DATASET}.json")
     with pd.option_context("display.width", 220, "display.max_columns", 20):
         print(card[card["group"] == "overall"].drop(columns=["group"]).round(3).to_string(index=False))
