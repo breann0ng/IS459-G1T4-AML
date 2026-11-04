@@ -32,7 +32,8 @@ variable "budget_limit_usd" {
 
 variable "budget_emails" {
   type        = list(string)
-  description = "Who gets the cost alerts (person 1). Set in terraform.tfvars."
+  default     = [] # [] = track only, no emails
+  description = "Optional: who gets budget emails at 50/80/100%. Empty = tracking in Budgets + CloudWatch only."
 }
 
 variable "athena_scan_limit_gb" {
