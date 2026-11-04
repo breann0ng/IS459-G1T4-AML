@@ -1,6 +1,8 @@
 """
-BQ1 stage 2 page: how well the alerts are NAMED (fan-in, cycle, layering, ...), on validation days.
-    streamlit run app_stage2.py        (data/stage2_data.json; written by pipeline/stage2_report.py)
+BQ1 stage 2 page: how well the alerts are NAMED (fan-in, cycle, layering, ...), on validation days,
+plus the one-off HI-Large test of the final setup.
+    streamlit run app_stage2.py        (data/stage2_data.json; written by pipeline/stage2_report.py;
+                                        data/dashboard_data*.json; written by pipeline/final_report.py)
 """
 import json
 from pathlib import Path
@@ -10,13 +12,15 @@ import pandas as pd
 import streamlit as st
 
 BLUE, GREY, RED, ORANGE, INK = "#2F7FAD", "#B9B2A8", "#C0504D", "#E07B39", "#262626"
+FINAL_RUN = "enrui_breann_mld20"     # the HI-Large test shown in section 6 (FINAL_NAME of rebuild_final.sh)
 
 st.set_page_config(page_title="BQ1 · Naming the pattern", layout="wide")
 
 
 @st.cache_data
-def load():
-    return json.loads((Path(__file__).parent / "data" / "stage2_data.json").read_text())
+def load(name="stage2_data.json"):
+    f = Path(__file__).parent / "data" / name
+    return json.loads(f.read_text()) if f.exists() else None
 
 
 def nice(p):
@@ -38,7 +42,8 @@ st.markdown(
     "pattern it is**, so they know where to look."
 )
 ds_name = st.radio("Validation data", sorted(board["dataset"].unique(), reverse=True), horizontal=True,
-                   help="Last 25% of each dataset's days. The models never trained on them. HI-Large is not used.")
+                   help="Last 25% of each dataset's days. The models never trained on them. "
+                        "HI-Large is only used for the final test (section 6).")
 st.caption(f"Showing run **{pick}** against the baseline **{base_cfg}** · stage 1 = {d['stage1_config']} · "
            "end to end: only stage 1's alerts are named, and naming a false alert counts as wrong")
 
@@ -97,14 +102,15 @@ pats["run"] = pats["config"].map({pick: "This run", base_cfg: "Baseline"})
 order = (pats[pats["config"] == pick].sort_values("f1", ascending=False)["pattern_name"].tolist())
 
 
-def dumbbell(measure, title):
+def dumbbell(measure, title, data=None, sort=None, runs=("Baseline", "This run")):
+    data = pats if data is None else data
     x = alt.X(f"{measure}:Q", title=title, axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1]))
-    y = alt.Y("pattern_name:N", sort=order, title=None)
-    line = alt.Chart(pats).mark_rule(color="#D9D3CA", strokeWidth=2).encode(
+    y = alt.Y("pattern_name:N", sort=order if sort is None else sort, title=None, axis=alt.Axis(labelLimit=320))
+    line = alt.Chart(data).mark_rule(color="#D9D3CA", strokeWidth=2).encode(
         y=y, x=alt.X(f"min({measure}):Q"), x2=alt.X2(f"max({measure}):Q"))
-    dots = alt.Chart(pats).mark_point(filled=True, size=120, opacity=1).encode(
+    dots = alt.Chart(data).mark_point(filled=True, size=120, opacity=1).encode(
         y=y, x=x,
-        color=alt.Color("run:N", scale=alt.Scale(domain=["Baseline", "This run"], range=[GREY, BLUE]),
+        color=alt.Color("run:N", scale=alt.Scale(domain=list(runs), range=[GREY, BLUE]),
                         legend=alt.Legend(title=None, orient="top")),
         tooltip=[alt.Tooltip("pattern_name:N", title="Pattern"), "run:N",
                  alt.Tooltip(f"{measure}:Q", format=".1%"), alt.Tooltip("true_cases:Q", format=",", title="True cases"),
@@ -220,13 +226,100 @@ e3.metric("Pattern F1 on true alerts only", f"{caught['f1'].mean():.3f}" if len(
 st.caption("If F1 on true alerts is much higher than end-to-end F1, the losses come from false alerts and missed "
            "laundering (stage 1), not from the namer.")
 
+st.divider()
+
+# ------------------------------------------------------------------ 6. HI-Large final test
+st.subheader("6 · Final test on HI-Large: one run, never tuned on")
+old_f, new_f = load("dashboard_data.json"), load(f"dashboard_data_{FINAL_RUN}.json")
+if not (old_f and new_f):
+    st.info(f"Needs data/dashboard_data.json (the team's final run) and data/dashboard_data_{FINAL_RUN}.json "
+            "(pipeline/final_report.py with AML_FINAL_RUN set).")
+else:
+    RUNS = ("Team original", FINAL_RUN)
+
+    def e2e(f, label):
+        t = pd.DataFrame(f["stage2"])
+        return t[t["mode"] == "end_to_end"].assign(run=label)
+
+    def stage1(f):
+        t = pd.DataFrame(f["stage1"])
+        ad = t[t["level"] == "account_day"]
+        used = ad[ad["cutoff"].str.startswith("expand")]           # the alerts stage 2 named
+        return (used if len(used) else ad[ad["cutoff"] == "frozen_threshold"]).iloc[0]
+
+    e_old, e_new = e2e(old_f, RUNS[0]), e2e(new_f, RUNS[1])
+    m_old = e_old[e_old["pattern"].str.startswith("MACRO")].iloc[0]
+    m_new = e_new[e_new["pattern"].str.startswith("MACRO")].iloc[0]
+    s_old, s_new = stage1(old_f), stage1(new_f)
+    st.caption(f"HI-Large {s_new.get('date_from', '')} to {s_new.get('date_to', '')}, scored once with settings chosen "
+               f"on validation only. **{FINAL_RUN}** = follow-the-money alerts + context features + one name per "
+               "group + 20-day cross-day linking, against the team's original final run on the same days.")
+
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric("Pattern macro F1", f"{m_new['f1']:.3f}", f"{m_new['f1'] - m_old['f1']:+.3f} vs team original")
+    h2.metric("Pattern precision", f"{m_new['precision']:.0%}", f"{m_new['precision'] - m_old['precision']:+.1%}")
+    h3.metric("Pattern recall", f"{m_new['recall']:.0%}", f"{m_new['recall'] - m_old['recall']:+.1%}")
+    d_s1 = s_new["f1"] - s_old["f1"]
+    h4.metric("Stage 1 account-day F1", f"{s_new['f1']:.3f}",
+              "same as team original" if abs(d_s1) < 0.001 else f"{d_s1:+.3f}",
+              delta_color="off" if abs(d_s1) < 0.001 else "normal",
+              help=f"Laundering account-days found. Patterned laundering flagged: {s_new['recall_patterns']:.1%} "
+                   f"(team original {s_old['recall_patterns']:.1%}).")
+
+    hp = pd.concat([e_old, e_new])
+    hp = hp[~hp["pattern"].str.startswith("MACRO") & (hp["pattern"] != "unclassified")].copy()
+    hp["pattern_name"] = hp["pattern"].map(nice)
+    order6 = e_new[~e_new["pattern"].str.startswith("MACRO") & (e_new["pattern"] != "unclassified")] \
+        .sort_values("f1", ascending=False)["pattern"].map(nice).tolist()
+
+    # how often each true pattern is called layering: the catch-all that is left
+    cf = pd.concat([pd.DataFrame(f["confusion"]).assign(run=lbl) for f, lbl in ((old_f, RUNS[0]), (new_f, RUNS[1]))])
+    cf["true_cases"] = cf.groupby(["run", "true_pattern"])["n"].transform("sum")
+    lay = cf[cf["predicted_pattern"] == "layering"].rename(columns={"n": "named_as"})
+    lay = lay[lay["true_pattern"] != "layering"].copy()
+    lay["share"] = lay["named_as"] / lay["true_cases"]
+    lay["pattern_name"] = lay["true_pattern"].map(nice)
+    order_lay = lay[lay["run"] == RUNS[1]].sort_values("share", ascending=False)["pattern_name"].tolist()
+
+    c1, c2 = st.columns(2, gap="large")
+    with c1:
+        st.altair_chart(dumbbell("f1", "F1 per pattern, end to end", data=hp, sort=order6, runs=RUNS),
+                        width="stretch")
+    with c2:
+        st.altair_chart(dumbbell("share", "Share of this true pattern named layering (lower = better)",
+                                 data=lay, sort=order_lay, runs=RUNS), width="stretch")
+    l_old = e_old.set_index("pattern").loc["layering"]
+    l_new = e_new.set_index("pattern").loc["layering"]
+    st.caption(f"Layering is the namer's catch-all: {l_new['named_as']:,.0f} alerts were named layering for "
+               f"{l_new['true_cases']:,.0f} true ones (team original {l_old['named_as']:,.0f}). Context features "
+               "and the group vote already pull fan in / fan out / gather scatter out of it (right chart), but "
+               "about half of cycles and random schemes are still called layering. Scaling layering down on "
+               "validation (round 5) gave no gain there, so it was not run on HI-Large: the over-naming comes "
+               "from HI-Large's schemes looking different from the validation days.")
+
+    vb = board[board["method"] == "group"].groupby("config")["f1"].mean()
+    if {"txn_v3m_grp", f"{FINAL_RUN}_grp"} <= set(vb.index):
+        st.dataframe(pd.DataFrame({
+            "Data": ["Validation (mean of HI-Small, HI-Medium)", "HI-Large (final test)"],
+            RUNS[0]: [vb["txn_v3m_grp"], m_old["f1"]], RUNS[1]: [vb[f"{FINAL_RUN}_grp"], m_new["f1"]]})
+            .assign(Change=lambda t: t[RUNS[1]] - t[RUNS[0]]).round(3), hide_index=True, width="stretch")
+        st.caption("Both runs drop from validation to HI-Large by a similar amount: HI-Large is harder, "
+                   "and the gain holds.")
+    with st.expander("Table"):
+        st.dataframe(hp.pivot_table(index="pattern_name", columns="run",
+                                    values=["precision", "recall", "f1", "named_as", "true_cases"]).round(3),
+                     width="stretch")
+        st.dataframe(lay.pivot_table(index="pattern_name", columns="run", values=["share", "named_as"]).round(3),
+                     width="stretch")
+
 with st.expander("How to read this, and its limits"):
     st.markdown(
         "- An **alert** is one account on one day. Stage 2 gives each alert a pattern name, or *unclassified*.\n"
         "- **Pattern precision / recall** are averaged over the named patterns (macro), so rare patterns count "
         "as much as common ones. Unclassified laundering is left out of the average.\n"
         "- Validation = the last 25% of days of HI-Small and HI-Medium; every setting was chosen on these days, "
-        "so the numbers are slightly optimistic. HI-Large was not used.\n"
+        "so sections 1–5 are slightly optimistic. Section 6 is the honest number: HI-Large (12–25 Sep), "
+        "scored once with those settings.\n"
         "- Bipartite and stack are merged into **layering**: the data cannot tell them apart reliably.\n"
         "- True patterns come from the dataset's answer key (`Patterns.txt`), used only to mark results."
     )
