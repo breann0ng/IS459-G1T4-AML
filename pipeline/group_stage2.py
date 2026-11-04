@@ -222,6 +222,15 @@ def class_table(true, pred, classes, total_true=None):
     return pd.concat([t, pd.DataFrame([macro])], ignore_index=True)
 
 
+def scale_classes(proba, scale):
+    """Multiply some classes' probabilities (DataFrame, one column per class), then renormalise."""
+    proba = proba.copy()
+    for c, f in scale.items():
+        if c in proba:
+            proba[c] *= f
+    return proba.div(proba.sum(axis=1), axis=0)
+
+
 def value(text):
     for cast in (int, float):
         try:
@@ -251,7 +260,11 @@ def main():
                     help="add features from payments that cross the group border (one step outside)")
     ap.add_argument("--min-confidence", type=float, default=0.0,
                     help="name 'unclassified' (analyst decides) when the top probability is below this")
+    ap.add_argument("--class-scale", action="append", default=[], metavar="CLASS=FACTOR",
+                    help="multiply a class's probability before naming, e.g. layering=0.6 so the "
+                         "catch-all class has to win more clearly (repeatable)")
     a = ap.parse_args()
+    class_scale = {k: float(v) for k, v in (p.split("=", 1) for p in a.class_scale)}
     out_cfg = a.out_config or f"{a.stage1}_grp"
     if not out_cfg.endswith("_grp"):
         out_cfg += "_grp"
@@ -261,7 +274,8 @@ def main():
     S.STAGE2_PARAMS.update({k: value(v) for k, v in (p.split("=", 1) for p in a.param)})
     settings = {"namer_params": S.STAGE2_PARAMS, "keep_rates": KEEP_RATES, "hub_degree": HUB_DEGREE,
                 "max_linked_days": MAX_LINKED_DAYS, "link_days": S.LINK_DAYS, "features": a.features,
-                "group_vote": a.group_vote, "min_confidence": a.min_confidence, "context": a.context}
+                "group_vote": a.group_vote, "min_confidence": a.min_confidence, "context": a.context,
+                "class_scale": class_scale}
     print(f"[settings] {json.dumps(settings)}")
     t0 = time.time()
 
@@ -319,6 +333,8 @@ def main():
         fg = with_groups(flagged, pays_v, "alerts")
         proba = pd.DataFrame(model.predict_proba(fg[feat + gcols].fillna(0.0).to_numpy(np.float32)),
                              columns=model.classes_, index=fg.index)
+        if class_scale:                       # make a catch-all class (layering) win more clearly
+            proba = scale_classes(proba, class_scale)
         if a.group_vote:                      # one name per group: average its members' probabilities
             proba = proba.groupby(fg["group_id"]).transform("mean")
         fg["pred_group"] = proba.idxmax(axis=1)

@@ -55,7 +55,8 @@ def main():
     S.LINK_DAYS = meta.get("link_days", S.LINK_DAYS)
     ctx, vote = meta.get("context", False), meta.get("group_vote", False)
     print(f"[name] settings from {meta.get('group_run') or 'defaults'}: link_days {S.LINK_DAYS}, "
-          f"max_linked_days {G.MAX_LINKED_DAYS}, hub {G.HUB_DEGREE}, context {ctx}, group vote {vote}")
+          f"max_linked_days {G.MAX_LINKED_DAYS}, hub {G.HUB_DEGREE}, context {ctx}, group vote {vote}, "
+          f"class scale {meta.get('class_scale') or 'none'}")
 
     al = S.load_table(table("final_alert_rows"), ds.field("dataset") == DATASET)
     al["date"] = pd.to_datetime(al["date"]).dt.date
@@ -66,6 +67,8 @@ def main():
     pays = G.context_for(al) if ctx else S.payments_for(al)
     g = G.with_groups(al, pays, "alerts")
     proba = booster.predict(g[f2 + gcols].fillna(0.0).to_numpy(np.float32))
+    if meta.get("class_scale"):               # same class scaling as the validated run
+        proba = G.scale_classes(pd.DataFrame(proba, columns=classes, index=g.index), meta["class_scale"]).to_numpy()
     if vote:                                  # one name per group: average its members' probabilities
         proba = pd.DataFrame(proba, index=g.index).groupby(g["group_id"]).transform("mean").to_numpy()
     g["predicted_pattern"] = np.array(classes)[proba.argmax(axis=1)]

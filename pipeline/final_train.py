@@ -121,6 +121,7 @@ def main():
             "max_linked_days": G.MAX_LINKED_DAYS, "link_days": S.LINK_DAYS,
             "expand": expand, "expand_hops": hops, "group_run": GROUP_RUN,
             "context": bool(st["context"]), "group_vote": bool(st["group_vote"]),
+            "class_scale": st.get("class_scale") or {},
             "namer_params": S.STAGE2_PARAMS, "trained_at": T.RUN_AT}
     put_text(f"{MODEL_DIR}/meta.json", json.dumps(meta, indent=1, default=str))
     print(f"[final] saved models/final/ (stage1.txt, namer_group.txt, meta.json) in {time.time() - t0:.0f}s")
