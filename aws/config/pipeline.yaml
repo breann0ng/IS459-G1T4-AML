@@ -2,9 +2,20 @@
 # arguments / environment; until then they document what legacy-emr/rebuild_final.sh did by hand.
 
 aws:
-  region: ap-southeast-2            # pin it: a us-east-1 default once broke stage 2 against the Sydney bucket
+  region: us-east-1                 # same region as the bucket; never mix regions (a mismatch once broke stage 2)
   bucket: pw-aml-g1t4               # set to the team bucket; every script reads AML_ROOT=s3://<bucket>
   code_prefix: code/                # aws/deploy/deploy.sh uploads aws/jobs/ here
+
+emr_serverless:
+  application_id: 00ga27nqsrmqmp09
+  release: emr-spark-8.0
+  architecture: x86_64
+  java: 17
+  job_role: aml-emr-serverless-job  # IAM role the jobs run as (S3 + Glue)
+  max_capacity: {vcpu: 16, memory_gb: 64}
+  auto_stop_idle_minutes: 15
+  max_concurrent_runs: 2
+  queue_timeout_minutes: 120
 
 lake:                               # medallion layers (S3 prefixes)
   bronze: raw/                      # plain files, never edited

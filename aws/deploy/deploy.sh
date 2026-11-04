@@ -5,7 +5,7 @@
 # jobs.zip (passed with --py-files) so `import train_txn` etc. work exactly as on the old cluster.
 set -euo pipefail
 BUCKET="${AML_BUCKET:?set AML_BUCKET}"
-export AWS_REGION="${AWS_REGION:-ap-southeast-2}"
+export AWS_REGION="${AWS_REGION:-us-east-1}"
 cd "$(dirname "$0")/../.."
 [ "$(git branch --show-current)" = "main" ] || { echo "deploy from main only"; exit 1; }
 rm -rf build && mkdir -p build/jobs
