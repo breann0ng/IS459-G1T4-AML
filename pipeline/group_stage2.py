@@ -11,6 +11,8 @@ Plain Python on the EMR primary node (needs scheme_stage2.py in the same folder)
                                                     one name per group; unsure -> unclassified
     python3 group_stage2.py txn_v3m_xp --context --group-vote --baselines --out-config s2_xp_ctx_vote_bl
                                                     + logistic regression and shape-rule namers
+    python3 group_stage2.py txn_v3m_xp --context --group-vote --timing --out-config s2_xp_ctx_vote_tim
+                                                    + order of the payments inside each group
     Every run also saves the top-2 hit rate (mode "caught_top2").
 
 What changed from Task C (scheme_stage2.py)
@@ -196,6 +198,54 @@ def context_features(r, gid, hop1, hop2):
     return f
 
 
+# ============================================================== timing: order of payments in the group
+TIMING = False                   # --timing
+
+
+def _in_first(t_in, t_out):
+    """Share of the incoming payments made before the first outgoing one (1 if nothing goes out)."""
+    if not len(t_in):
+        return 0.0
+    return float((t_in < t_out.min()).mean()) if len(t_out) else 1.0
+
+
+def timing_features(r, gid, edges):
+    """Order of the payments inside each group: the shape features (S.group_features) ignore
+    time, yet the patterns the namer confuses most differ mainly in it.
+    h_hub_in_first    share of the hub's incoming payments before its first outgoing one
+                      (gather-scatter: collects, then pays out)
+    h_hub_out_first   share of the hub's outgoing payments before its first incoming one
+    h_hub_gap_h       hours from the hub's last incoming to its first outgoing payment (0 if one is missing)
+    h_two_hubs        the top sender and the top receiver are different accounts (scatter-gather)
+    h_scatter_first   ... and the top sender pays out before the top receiver collects
+    h_origin_returns  the account that made the group's first payment later receives money in it (cycle)
+    rh_in_first       this account: share of its incoming payments before its first outgoing one
+    (hub = the account with the most payments in and out of the group)"""
+    e = edges.assign(g=[gid[(s, d)] for s, d in zip(edges["src"], edges["date"])],
+                     t=pd.to_datetime(edges["txn_time"]))
+    G, node = {}, {}
+    for g, x in e.groupby("g"):
+        n_in, n_out = x["dst"].value_counts(), x["src"].value_counts()
+        hub = n_in.add(n_out, fill_value=0).idxmax()
+        t_in, t_out = x.loc[x["dst"] == hub, "t"], x.loc[x["src"] == hub, "t"]
+        top_s, top_r = n_out.idxmax(), n_in.idxmax()
+        two = top_s != top_r and n_out.max() > 1 and n_in.max() > 1
+        first = x.loc[x["t"].idxmin()]
+        G[g] = {"h_hub_in_first": _in_first(t_in, t_out), "h_hub_out_first": _in_first(t_out, t_in),
+                "h_hub_gap_h": (t_out.min() - t_in.max()).total_seconds() / 3600 if len(t_in) and len(t_out) else 0.0,
+                "h_two_hubs": int(two),
+                "h_scatter_first": int(two and x.loc[x["src"] == top_s, "t"].min() < x.loc[x["dst"] == top_r, "t"].min()),
+                "h_origin_returns": int(((x["dst"] == first["src"]) & (x["t"] > first["t"])).any())}
+        for a in set(x["src"]) | set(x["dst"]):
+            node[(g, a)] = _in_first(x.loc[x["dst"] == a, "t"], x.loc[x["src"] == a, "t"])
+    gids = [gid[(k, d)] for k, d in zip(r["k"], r["date"])]
+    cols = ["h_hub_in_first", "h_hub_out_first", "h_hub_gap_h", "h_two_hubs", "h_scatter_first", "h_origin_returns"]
+    f = pd.DataFrame([G.get(g, {}) for g in gids], columns=cols).fillna(0.0)    # no payments: all 0
+    f["rh_in_first"] = [node.get((g, k), 0.0) for g, k in zip(gids, r["k"])]
+    f.index = r.index
+    return f
+
+
 def with_groups(rows, payments_by_ds, label=""):
     parts = []
     for d, r in rows.groupby("dataset"):
@@ -207,6 +257,8 @@ def with_groups(rows, payments_by_ds, label=""):
         gf = S.group_features(r, gid, edges)
         if ctx:
             gf = pd.concat([gf, context_features(r, gid, pay[1], pay[2])], axis=1)
+        if TIMING:
+            gf = pd.concat([gf, timing_features(r, gid, edges)], axis=1)
         gf["group_id"] = [f"{d}#{gid[(k, dt)]}" for k, dt in zip(r["k"], r["date"])]
         print(f"[groups] {label} {d}: {len(r)} account-days -> {len(set(gid.values()))} groups "
               f"({len(r) / max(len(set(gid.values())), 1):.1f} per group), {len(edges)} linking payments, "
@@ -274,7 +326,7 @@ def value(text):
 
 
 def main():
-    global KEEP_RATES, HUB_DEGREE, MAX_LINKED_DAYS
+    global KEEP_RATES, HUB_DEGREE, MAX_LINKED_DAYS, TIMING
     ap = argparse.ArgumentParser(description="Group-level stage 2, end to end")
     ap.add_argument("stage1", help="config of a train_txn.py run, e.g. txn_v3m")
     ap.add_argument("--features", default="features_v3", help="account-day table (namer features)")
@@ -291,6 +343,8 @@ def main():
                     help="average the namer's probabilities over each group: one name per group")
     ap.add_argument("--context", action="store_true",
                     help="add features from payments that cross the group border (one step outside)")
+    ap.add_argument("--timing", action="store_true",
+                    help="add features on the ORDER of the payments inside the group (h_*, rh_*)")
     ap.add_argument("--min-confidence", type=float, default=0.0,
                     help="name 'unclassified' (analyst decides) when the top probability is below this")
     ap.add_argument("--class-scale", action="append", default=[], metavar="CLASS=FACTOR",
@@ -306,11 +360,12 @@ def main():
         out_cfg += "_grp"
     if a.keep_rates:
         KEEP_RATES = [float(k) for k in a.keep_rates.split(",")]
-    HUB_DEGREE, MAX_LINKED_DAYS, S.LINK_DAYS = a.hub_degree, a.max_linked_days, a.link_days
+    HUB_DEGREE, MAX_LINKED_DAYS, S.LINK_DAYS, TIMING = a.hub_degree, a.max_linked_days, a.link_days, a.timing
     S.STAGE2_PARAMS.update({k: value(v) for k, v in (p.split("=", 1) for p in a.param)})
     settings = {"namer_params": S.STAGE2_PARAMS, "keep_rates": KEEP_RATES, "hub_degree": HUB_DEGREE,
                 "max_linked_days": MAX_LINKED_DAYS, "link_days": S.LINK_DAYS, "features": a.features,
                 "group_vote": a.group_vote, "min_confidence": a.min_confidence, "context": a.context,
+                "timing": a.timing,
                 "class_scale": class_scale, "baselines": a.baselines}
     print(f"[settings] {json.dumps(settings)}")
     t0 = time.time()
@@ -340,7 +395,7 @@ def main():
         part = smp if keep >= 1 else smp.sample(frac=keep, random_state=SEED + i)
         copies.append(with_groups(part, pays, f"train keep={keep:.0%}"))
     train = pd.concat(copies, ignore_index=True)
-    gcols = [c for c in train.columns if c.startswith(("g_", "r_", "c_", "rc_"))]
+    gcols = [c for c in train.columns if c.startswith(("g_", "r_", "c_", "rc_", "h_", "rh_"))]
     y = S.true_class(train, merge).to_numpy()
     model = S.fit(train[feat + gcols].fillna(0.0).to_numpy(np.float32), y)
     print(f"[train] group namer on {len(train)} rows ({len(feat)} account-day + {len(gcols)} group "
