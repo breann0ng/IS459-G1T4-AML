@@ -26,3 +26,11 @@ build/
 Claude outputs/
 data/perf/
 aws/deploy/venv.tar.gz
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+crash.log

@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars (not committed) and fill in.
+budget_emails = ["person1@example.com"]
+# budget_limit_usd = 50
