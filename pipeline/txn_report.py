@@ -72,6 +72,9 @@ def group_report(cfg):
         for m, s in (("account", a), ("group", b)):
             t[f"{m}_P"], t[f"{m}_R"], t[f"{m}_F1"] = s["precision"], s["recall"], s["f1"]
         t["change_F1"] = t["group_F1"] - t["account_F1"]
+        for m in ("logreg", "rules"):                  # baselines, only with --baselines
+            if (e["method"] == m).any():
+                t[f"{m}_F1"] = e[e["method"] == m].set_index("pattern")["f1"]
         c = x[x["mode"] == "caught"].pivot_table(index="pattern", columns="method", values="f1")
         t["caught_account_F1"], t["caught_group_F1"] = c.get("account"), c.get("group")
         order = [p for p in t.index if not p.startswith("MACRO")] + [p for p in t.index if p.startswith("MACRO")]

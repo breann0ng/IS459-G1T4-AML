@@ -49,12 +49,14 @@ def main():
     board["run"] = board["config"]
     old = macro[(macro["method"] == "account") & (macro["config"] == a.baseline)].copy()
     old["run"] = "account namer (before group shape)"
-    board = pd.concat([board, old], ignore_index=True)
+    base = macro[macro["method"].isin(["logreg", "rules"])].copy()     # runs with --baselines
+    base["run"] = base["config"] + " · " + base["method"]
+    board = pd.concat([board, old, base], ignore_index=True)
     board["settings_json"] = board.get("settings_json", pd.Series(dtype=str)).fillna("{}")
     top2 = g[(g["mode"] == "caught_top2") & g["pattern"].str.startswith("MACRO")]
     board = board.merge(top2[["config", "dataset", "recall"]].rename(columns={"recall": "top2"}),
                         on=["config", "dataset"], how="left")
-    board.loc[board["method"] == "account", "top2"] = np.nan
+    board.loc[board["method"] != "group", "top2"] = np.nan
     board = board[["run", "config", "method", "dataset", "stage1_config", "precision", "recall", "f1",
                    "top2", "settings_json", "run_at"]]
     mean_f1 = board[board["method"] == "group"].groupby("config")["f1"].mean()
