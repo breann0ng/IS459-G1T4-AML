@@ -1,0 +1,365 @@
+
+=================== txn_v3m
+run at 2026-11-03 15:51:53 · 179 features · threshold 0.9755 · params {"n_estimators": 1000, "num_leaves": 127, "learning_rate": 0.03, "subsample": 0.8, "subsample_freq": 1, "colsample_bytree": 0.4, "min_child_samples": 100, "random_state": 42, "verbose": -1, "scale_pos_weight": 1}
+STAGE 1 (validation best-F1 threshold)
+  dataset              level  precision  recall    f1  alerts_per_day  pr_auc  recall_patterns  recall_unclassified
+HI-Medium account_day_rollup      0.911   0.538 0.676          2139.5   0.677              NaN                  NaN
+HI-Medium        transaction      0.896   0.554 0.685          1423.0   0.670            0.888                0.008
+ HI-Small account_day_rollup      0.899   0.512 0.652           426.5   0.641              NaN                  NaN
+ HI-Small        transaction      0.892   0.546 0.677           292.5   0.664            0.889                0.005
+top features (share of total gain): t_fmt_ach 14.1%, t_pair_age_d 13.0%, r_age_days 4.9%, s_n_cross_ccy 4.0%, t_pair_n_7d 3.7%, t_amt_rel 3.4%, r_x_trend 3.3%, s_age_days 2.6%, r_x_new_cp_in 1.6%, t_fmt_credit_card 1.6%, r_cycles_today 1.3%, s_cycles_7d 1.3%, s_cycles_today 1.1%, s_out_cp_max_senders 1.1%, s_n_out 1.1%
+
+STAGE 2 END TO END (label precision / recall / F1 over stage 1's alerts) + caught F1 + oracle F1 (diagnostic)
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1  oracle_f1
+pattern                                                                                                     
+fan_in                     943       815      268            0.329       0.284   0.305      0.333      0.315
+fan_out                    700       848      233            0.275       0.333   0.301      0.326      0.321
+gather_scatter            1604      1845      730            0.396       0.455   0.423      0.450      0.432
+scatter_gather            1264      1496      619            0.414       0.490   0.449      0.477      0.458
+cycle                      795       737      206            0.280       0.259   0.269      0.295      0.287
+random                     669       583      135            0.232       0.202   0.216      0.233      0.233
+layering                  2754      1868      847            0.453       0.308   0.367      0.427      0.435
+unclassified              5767       366       20            0.055       0.003   0.007      0.194      0.945
+MACRO (7 patterns)        8729      8192     3038            0.340       0.333   0.333      0.363      0.354
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1  oracle_f1
+pattern                                                                                                     
+fan_in                      76        90       24            0.267       0.316   0.289      0.322      0.303
+fan_out                     86        85       32            0.376       0.372   0.374      0.388      0.354
+gather_scatter             171       136       65            0.478       0.380   0.423      0.456      0.439
+scatter_gather             139       139       67            0.482       0.482   0.482      0.506      0.479
+cycle                       83        68       23            0.338       0.277   0.305      0.346      0.314
+random                      57        70       18            0.257       0.316   0.283      0.313      0.295
+layering                   239       215      110            0.512       0.460   0.485      0.560      0.536
+unclassified               648        50        1            0.020       0.002   0.003      0.069      0.928
+MACRO (7 patterns)         851       803      339            0.387       0.372   0.377      0.413      0.388
+
+=================== txn_v3m_mld3_grp
+run at 2026-11-03 16:12:05 · stage 1 = txn_v3m · LINK_DAYS=2 MAX_LINKED_DAYS=3 · namers account, group, logreg, rules
+
+STAGE 2 END TO END · account namer: account-day features only (today's namer) + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943       815      268            0.329       0.284   0.305      0.333
+fan_out                    700       848      233            0.275       0.333   0.301      0.326
+gather_scatter            1604      1845      730            0.396       0.455   0.423      0.450
+scatter_gather            1264      1496      619            0.414       0.490   0.449      0.477
+cycle                      795       737      206            0.280       0.259   0.269      0.295
+random                     669       583      135            0.232       0.202   0.216      0.233
+layering                  2754      1868      847            0.453       0.308   0.367      0.427
+unclassified              5767       366       20            0.055       0.003   0.007      0.194
+MACRO (7 patterns)        8729      8192     3038            0.340       0.333   0.333      0.363
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76        90       24            0.267       0.316   0.289      0.322
+fan_out                     86        85       32            0.376       0.372   0.374      0.388
+gather_scatter             171       136       65            0.478       0.380   0.423      0.456
+scatter_gather             139       139       67            0.482       0.482   0.482      0.506
+cycle                       83        68       23            0.338       0.277   0.305      0.346
+random                      57        70       18            0.257       0.316   0.283      0.313
+layering                   239       215      110            0.512       0.460   0.485      0.560
+unclassified               648        50        1            0.020       0.002   0.003      0.069
+MACRO (7 patterns)         851       803      339            0.387       0.372   0.377      0.413
+
+STAGE 2 END TO END · group namer: account-day + group shape / role features (LightGBM) + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943       821      435            0.530       0.461   0.493      0.529
+fan_out                    700       579      249            0.430       0.356   0.389      0.416
+gather_scatter            1604      1285      715            0.556       0.446   0.495      0.528
+scatter_gather            1264      1732      883            0.510       0.699   0.589      0.614
+cycle                      795       735      300            0.408       0.377   0.392      0.426
+random                     669       465      166            0.357       0.248   0.293      0.315
+layering                  2754      2544     1687            0.663       0.613   0.637      0.747
+unclassified              5767       397       32            0.081       0.006   0.010      0.340
+MACRO (7 patterns)        8729      8161     4435            0.493       0.457   0.470      0.511
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76        82       38            0.463       0.500   0.481      0.524
+fan_out                     86        58       22            0.379       0.256   0.306      0.312
+gather_scatter             171       114       68            0.596       0.398   0.477      0.517
+scatter_gather             139       197       86            0.437       0.619   0.512      0.526
+cycle                       83        72       28            0.389       0.337   0.361      0.418
+random                      57        33       17            0.515       0.298   0.378      0.405
+layering                   239       250      163            0.652       0.682   0.667      0.782
+unclassified               648        47        2            0.043       0.003   0.006      0.174
+MACRO (7 patterns)         851       806      422            0.490       0.441   0.454      0.498
+
+STAGE 2 END TO END · logreg namer: baseline: logistic regression on the group namer's features + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943       746      352            0.472       0.373   0.417      0.448
+fan_out                    700       695      275            0.396       0.393   0.394      0.424
+gather_scatter            1604      1468      630            0.429       0.393   0.410      0.438
+scatter_gather            1264      1433      702            0.490       0.555   0.521      0.541
+cycle                      795       685      198            0.289       0.249   0.268      0.286
+random                     669       825      276            0.335       0.413   0.369      0.392
+layering                  2754      2185     1324            0.606       0.481   0.536      0.646
+unclassified              5767       521       17            0.033       0.003   0.005      0.093
+MACRO (7 patterns)        8729      8037     3757            0.431       0.408   0.416      0.454
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76        99       39            0.394       0.513   0.446      0.481
+fan_out                     86       105       42            0.400       0.488   0.440      0.467
+gather_scatter             171        90       49            0.544       0.287   0.375      0.402
+scatter_gather             139       151       72            0.477       0.518   0.497      0.514
+cycle                       83        90       39            0.433       0.470   0.451      0.484
+random                      57        35       15            0.429       0.263   0.326      0.357
+layering                   239       223      138            0.619       0.577   0.597      0.717
+unclassified               648        60        3            0.050       0.005   0.008      0.158
+MACRO (7 patterns)         851       793      394            0.471       0.445   0.447      0.489
+
+STAGE 2 END TO END · rules namer: baseline: shape_rules.py on each group, no model + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943      1255      595            0.474       0.631   0.541      0.569
+fan_out                    700       966      381            0.394       0.544   0.457      0.481
+gather_scatter            1604       153      147            0.961       0.092   0.167      0.180
+scatter_gather            1264         0        0            0.000       0.000   0.000      0.000
+cycle                      795       745      120            0.161       0.151   0.156      0.171
+random                     669      1370      416            0.304       0.622   0.408      0.424
+layering                  2754      1158      104            0.090       0.038   0.053      0.061
+unclassified              5767      2911       57            0.020       0.010   0.013      0.049
+MACRO (7 patterns)        8729      5647     1763            0.341       0.297   0.255      0.269
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76       143       53            0.371       0.697   0.484      0.507
+fan_out                     86       160       66            0.412       0.767   0.537      0.541
+gather_scatter             171        23       23            1.000       0.135   0.237      0.256
+scatter_gather             139         0        0            0.000       0.000   0.000      0.000
+cycle                       83        54       15            0.278       0.181   0.219      0.244
+random                      57       129       37            0.287       0.649   0.398      0.411
+layering                   239        78        0            0.000       0.000   0.000      0.000
+unclassified               648       266        4            0.015       0.006   0.009      0.042
+MACRO (7 patterns)         851       587      194            0.335       0.347   0.268      0.280
+
+=================== txn_v3m_mld10_grp
+run at 2026-11-03 16:15:29 · stage 1 = txn_v3m · LINK_DAYS=2 MAX_LINKED_DAYS=10 · namers account, group, logreg, rules
+
+STAGE 2 END TO END · account namer: account-day features only (today's namer) + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943       815      268            0.329       0.284   0.305      0.333
+fan_out                    700       848      233            0.275       0.333   0.301      0.326
+gather_scatter            1604      1845      730            0.396       0.455   0.423      0.450
+scatter_gather            1264      1496      619            0.414       0.490   0.449      0.477
+cycle                      795       737      206            0.280       0.259   0.269      0.295
+random                     669       583      135            0.232       0.202   0.216      0.233
+layering                  2754      1868      847            0.453       0.308   0.367      0.427
+unclassified              5767       366       20            0.055       0.003   0.007      0.194
+MACRO (7 patterns)        8729      8192     3038            0.340       0.333   0.333      0.363
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76        90       24            0.267       0.316   0.289      0.322
+fan_out                     86        85       32            0.376       0.372   0.374      0.388
+gather_scatter             171       136       65            0.478       0.380   0.423      0.456
+scatter_gather             139       139       67            0.482       0.482   0.482      0.506
+cycle                       83        68       23            0.338       0.277   0.305      0.346
+random                      57        70       18            0.257       0.316   0.283      0.313
+layering                   239       215      110            0.512       0.460   0.485      0.560
+unclassified               648        50        1            0.020       0.002   0.003      0.069
+MACRO (7 patterns)         851       803      339            0.387       0.372   0.377      0.413
+
+STAGE 2 END TO END · group namer: account-day + group shape / role features (LightGBM) + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943       679      389            0.573       0.413   0.480      0.514
+fan_out                    700       597      315            0.528       0.450   0.486      0.518
+gather_scatter            1604      1333      822            0.617       0.512   0.560      0.590
+scatter_gather            1264      1747      920            0.527       0.728   0.611      0.637
+cycle                      795       715      308            0.431       0.387   0.408      0.442
+random                     669       566      211            0.373       0.315   0.342      0.367
+layering                  2754      2516     1746            0.694       0.634   0.663      0.782
+unclassified              5767       405       31            0.077       0.005   0.010      0.341
+MACRO (7 patterns)        8729      8153     4711            0.534       0.491   0.507      0.550
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76        77       33            0.429       0.434   0.431      0.462
+fan_out                     86        38       16            0.421       0.186   0.258      0.267
+gather_scatter             171        98       62            0.633       0.363   0.461      0.490
+scatter_gather             139       222       98            0.441       0.705   0.543      0.557
+cycle                       83        63       27            0.429       0.325   0.370      0.432
+random                      57        38       22            0.579       0.386   0.463      0.500
+layering                   239       262      167            0.637       0.699   0.667      0.779
+unclassified               648        55        2            0.036       0.003   0.006      0.167
+MACRO (7 patterns)         851       798      425            0.510       0.443   0.456      0.498
+
+STAGE 2 END TO END · logreg namer: baseline: logistic regression on the group namer's features + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943       862      421            0.488       0.446   0.466      0.497
+fan_out                    700       754      349            0.463       0.499   0.480      0.507
+gather_scatter            1604      1401      781            0.557       0.487   0.520      0.548
+scatter_gather            1264      1076      552            0.513       0.437   0.472      0.498
+cycle                      795       721      187            0.259       0.235   0.247      0.264
+random                     669       943      313            0.332       0.468   0.388      0.410
+layering                  2754      2260     1463            0.647       0.531   0.584      0.704
+unclassified              5767       541       22            0.041       0.004   0.007      0.124
+MACRO (7 patterns)        8729      8017     4066            0.466       0.443   0.451      0.490
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76       119       46            0.387       0.605   0.472      0.497
+fan_out                     86       117       52            0.444       0.605   0.512      0.520
+gather_scatter             171        53       44            0.830       0.257   0.393      0.419
+scatter_gather             139       113       53            0.469       0.381   0.421      0.438
+cycle                       83        94       33            0.351       0.398   0.373      0.410
+random                      57        46       13            0.283       0.228   0.252      0.271
+layering                   239       244      145            0.594       0.607   0.600      0.725
+unclassified               648        67        3            0.045       0.005   0.008      0.150
+MACRO (7 patterns)         851       786      386            0.480       0.440   0.432      0.469
+
+STAGE 2 END TO END · rules namer: baseline: shape_rules.py on each group, no model + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943      1152      600            0.521       0.636   0.573      0.603
+fan_out                    700       899      383            0.426       0.547   0.479      0.505
+gather_scatter            1604       313      307            0.981       0.191   0.320      0.342
+scatter_gather            1264         0        0            0.000       0.000   0.000      0.000
+cycle                      795       826      127            0.154       0.160   0.157      0.172
+random                     669      1343      415            0.309       0.620   0.413      0.428
+layering                  2754      1427      109            0.076       0.040   0.052      0.059
+unclassified              5767      2598       57            0.022       0.010   0.014      0.056
+MACRO (7 patterns)        8729      5960     1941            0.352       0.313   0.285      0.301
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76       143       53            0.371       0.697   0.484      0.507
+fan_out                     86       160       66            0.412       0.767   0.537      0.541
+gather_scatter             171        23       23            1.000       0.135   0.237      0.256
+scatter_gather             139         0        0            0.000       0.000   0.000      0.000
+cycle                       83        54       15            0.278       0.181   0.219      0.244
+random                      57       129       37            0.287       0.649   0.398      0.411
+layering                   239        78        0            0.000       0.000   0.000      0.000
+unclassified               648       266        4            0.015       0.006   0.009      0.042
+MACRO (7 patterns)         851       587      194            0.335       0.347   0.268      0.280
+
+=================== txn_v3m_mld20_grp
+run at 2026-11-03 16:24:00 · stage 1 = txn_v3m · LINK_DAYS=2 MAX_LINKED_DAYS=20 · namers account, group, logreg, rules
+
+STAGE 2 END TO END · account namer: account-day features only (today's namer) + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943       815      268            0.329       0.284   0.305      0.333
+fan_out                    700       848      233            0.275       0.333   0.301      0.326
+gather_scatter            1604      1845      730            0.396       0.455   0.423      0.450
+scatter_gather            1264      1496      619            0.414       0.490   0.449      0.477
+cycle                      795       737      206            0.280       0.259   0.269      0.295
+random                     669       583      135            0.232       0.202   0.216      0.233
+layering                  2754      1868      847            0.453       0.308   0.367      0.427
+unclassified              5767       366       20            0.055       0.003   0.007      0.194
+MACRO (7 patterns)        8729      8192     3038            0.340       0.333   0.333      0.363
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76        90       24            0.267       0.316   0.289      0.322
+fan_out                     86        85       32            0.376       0.372   0.374      0.388
+gather_scatter             171       136       65            0.478       0.380   0.423      0.456
+scatter_gather             139       139       67            0.482       0.482   0.482      0.506
+cycle                       83        68       23            0.338       0.277   0.305      0.346
+random                      57        70       18            0.257       0.316   0.283      0.313
+layering                   239       215      110            0.512       0.460   0.485      0.560
+unclassified               648        50        1            0.020       0.002   0.003      0.069
+MACRO (7 patterns)         851       803      339            0.387       0.372   0.377      0.413
+
+STAGE 2 END TO END · group namer: account-day + group shape / role features (LightGBM) + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943       700      401            0.573       0.425   0.488      0.522
+fan_out                    700       627      314            0.501       0.449   0.473      0.504
+gather_scatter            1604      1297      815            0.628       0.508   0.562      0.593
+scatter_gather            1264      1696      907            0.535       0.718   0.613      0.638
+cycle                      795       727      297            0.409       0.374   0.390      0.424
+random                     669       547      199            0.364       0.297   0.327      0.351
+layering                  2754      2560     1782            0.696       0.647   0.671      0.791
+unclassified              5767       404       30            0.074       0.005   0.010      0.331
+MACRO (7 patterns)        8729      8154     4715            0.529       0.488   0.503      0.546
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76        76       36            0.474       0.474   0.474      0.507
+fan_out                     86        41       16            0.390       0.186   0.252      0.260
+gather_scatter             171        95       65            0.684       0.380   0.489      0.522
+scatter_gather             139       217       97            0.447       0.698   0.545      0.559
+cycle                       83        58       24            0.414       0.289   0.340      0.397
+random                      57        40       21            0.525       0.368   0.433      0.462
+layering                   239       267      169            0.633       0.707   0.668      0.781
+unclassified               648        59        2            0.034       0.003   0.006      0.143
+MACRO (7 patterns)         851       794      428            0.510       0.443   0.457      0.498
+
+STAGE 2 END TO END · logreg namer: baseline: logistic regression on the group namer's features + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943       850      417            0.491       0.442   0.465      0.495
+fan_out                    700       763      350            0.459       0.500   0.478      0.505
+gather_scatter            1604      1332      762            0.572       0.475   0.519      0.548
+scatter_gather            1264      1172      577            0.492       0.456   0.474      0.499
+cycle                      795       737      196            0.266       0.247   0.256      0.274
+random                     669       899      313            0.348       0.468   0.399      0.421
+layering                  2754      2256     1454            0.645       0.528   0.580      0.700
+unclassified              5767       549       23            0.042       0.004   0.007      0.128
+MACRO (7 patterns)        8729      8009     4069            0.467       0.445   0.453      0.492
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76       122       46            0.377       0.605   0.465      0.489
+fan_out                     86       123       53            0.431       0.616   0.507      0.515
+gather_scatter             171        45       37            0.822       0.216   0.343      0.366
+scatter_gather             139       113       53            0.469       0.381   0.421      0.438
+cycle                       83        96       34            0.354       0.410   0.380      0.417
+random                      57        36       10            0.278       0.175   0.215      0.233
+layering                   239       250      146            0.584       0.611   0.597      0.719
+unclassified               648        68        3            0.044       0.005   0.008      0.146
+MACRO (7 patterns)         851       785      379            0.474       0.431   0.418      0.454
+
+STAGE 2 END TO END · rules namer: baseline: shape_rules.py on each group, no model + caught F1
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                     943      1152      600            0.521       0.636   0.573      0.603
+fan_out                    700       899      383            0.426       0.547   0.479      0.505
+gather_scatter            1604       313      307            0.981       0.191   0.320      0.342
+scatter_gather            1264         0        0            0.000       0.000   0.000      0.000
+cycle                      795       826      127            0.154       0.160   0.157      0.172
+random                     669      1343      415            0.309       0.620   0.413      0.428
+layering                  2754      1427      109            0.076       0.040   0.052      0.059
+unclassified              5767      2598       57            0.022       0.010   0.014      0.056
+MACRO (7 patterns)        8729      5960     1941            0.352       0.313   0.285      0.301
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  e2e_recall  e2e_f1  caught_f1
+pattern                                                                                          
+fan_in                      76       143       53            0.371       0.697   0.484      0.507
+fan_out                     86       160       66            0.412       0.767   0.537      0.541
+gather_scatter             171        23       23            1.000       0.135   0.237      0.256
+scatter_gather             139         0        0            0.000       0.000   0.000      0.000
+cycle                       83        54       15            0.278       0.181   0.219      0.244
+random                      57       129       37            0.287       0.649   0.398      0.411
+layering                   239        78        0            0.000       0.000   0.000      0.000
+unclassified               648       266        4            0.015       0.006   0.009      0.042
+MACRO (7 patterns)         851       587      194            0.335       0.347   0.268      0.280
+
+=================== SUMMARY · stage 2 macro end-to-end F1 (7 patterns), per namer
+dataset                                          HI-Medium                      HI-Small                     
+method                                             account  group logreg  rules  account  group logreg  rules
+config            linking                                                                                    
+txn_v3m_mld3_grp  LINK_DAYS=2 MAX_LINKED_DAYS=3      0.333  0.470  0.416  0.255    0.377  0.454  0.447  0.268
+txn_v3m_mld10_grp LINK_DAYS=2 MAX_LINKED_DAYS=10     0.333  0.507  0.451  0.285    0.377  0.456  0.432  0.268
+txn_v3m_mld20_grp LINK_DAYS=2 MAX_LINKED_DAYS=20     0.333  0.503  0.453  0.285    0.377  0.457  0.418  0.268

@@ -1,0 +1,86 @@
+§14 local preview: rules namer (shape_rules.py) on ALL true laundering of HI-Small / HI-Medium
+upper bound: like round 3's oracle_f1, not comparable to end-to-end numbers
+
+=================== rules namer · LINK_DAYS=2 MAX_LINKED_DAYS=3
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  recall     f1
+fan_in                    2872      3613     1682            0.466   0.586  0.519
+fan_out                   2657      2882     1448            0.502   0.545  0.523
+gather_scatter            3968       224      186            0.830   0.047  0.089
+scatter_gather            4431       139      139            1.000   0.031  0.061
+cycle                     2845      2947     1513            0.513   0.532  0.522
+random                    2223      5777     1460            0.253   0.657  0.365
+layering                  9758      5130      560            0.109   0.057  0.075
+unclassified             20911     28953    19963            0.689   0.955  0.801
+MACRO (7 patterns)       28754     20712     6988            0.525   0.351  0.308
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  recall     f1
+fan_in                     331       445      225            0.506   0.680  0.580
+fan_out                    380       478      250            0.523   0.658  0.583
+gather_scatter             575        90       80            0.889   0.139  0.241
+scatter_gather             621       262      262            1.000   0.422  0.593
+cycle                      354       501      239            0.477   0.675  0.559
+random                     211       838      155            0.185   0.735  0.296
+layering                  1253       691       88            0.127   0.070  0.091
+unclassified              3405      3825     3101            0.811   0.911  0.858
+MACRO (7 patterns)        3725      3305     1299            0.530   0.483  0.420
+
+=================== rules namer · LINK_DAYS=2 MAX_LINKED_DAYS=10
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  recall     f1
+fan_in                    2872      2465     1637            0.664   0.570  0.613
+fan_out                   2657      2235     1512            0.677   0.569  0.618
+gather_scatter            3968      1110     1067            0.961   0.269  0.420
+scatter_gather            4431      1204     1203            0.999   0.271  0.427
+cycle                     2845      5307     1800            0.339   0.633  0.442
+random                    2223      5337     1391            0.261   0.626  0.368
+layering                  9758      5670      498            0.088   0.051  0.065
+unclassified             20911     26337    19945            0.757   0.954  0.844
+MACRO (7 patterns)       28754     23328     9108            0.570   0.427  0.422
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  recall     f1
+fan_in                     331       219      166            0.758   0.502  0.604
+fan_out                    380       295      242            0.820   0.637  0.717
+gather_scatter             575       317      308            0.972   0.536  0.691
+scatter_gather             621       265      265            1.000   0.427  0.598
+cycle                      354       615      246            0.400   0.695  0.508
+random                     211       808      155            0.192   0.735  0.304
+layering                  1253       978       81            0.083   0.065  0.073
+unclassified              3405      3633     3067            0.844   0.901  0.872
+MACRO (7 patterns)        3725      3497     1463            0.604   0.514  0.499
+
+=================== rules namer · LINK_DAYS=2 MAX_LINKED_DAYS=20
+-- HI-Medium
+                    true_cases  named_as  correct  label_precision  recall     f1
+fan_in                    2872      2344     1624            0.693   0.565  0.623
+fan_out                   2657      2105     1502            0.714   0.565  0.631
+gather_scatter            3968      1253     1237            0.987   0.312  0.474
+scatter_gather            4431      1204     1203            0.999   0.271  0.427
+cycle                     2845      6031     1905            0.316   0.670  0.429
+random                    2223      5248     1385            0.264   0.623  0.371
+layering                  9758      5515      472            0.086   0.048  0.062
+unclassified             20911     25965    19945            0.768   0.954  0.851
+MACRO (7 patterns)       28754     23700     9328            0.580   0.436  0.431
+-- HI-Small
+                    true_cases  named_as  correct  label_precision  recall     f1
+fan_in                     331       219      166            0.758   0.502  0.604
+fan_out                    380       295      242            0.820   0.637  0.717
+gather_scatter             575       317      308            0.972   0.536  0.691
+scatter_gather             621       265      265            1.000   0.427  0.598
+cycle                      354       615      246            0.400   0.695  0.508
+random                     211       808      155            0.192   0.735  0.304
+layering                  1253       978       81            0.083   0.065  0.073
+unclassified              3405      3633     3067            0.844   0.901  0.872
+MACRO (7 patterns)        3725      3497     1463            0.604   0.514  0.499
+
+=================== SUMMARY · rules namer F1 per pattern, columns = dataset LINK_DAYS/MAX_LINKED_DAYS
+                    HI-Small 2/3  HI-Small 2/10  HI-Small 2/20  HI-Medium 2/3  HI-Medium 2/10  HI-Medium 2/20
+fan_in                     0.580          0.604          0.604          0.519           0.613           0.623
+fan_out                    0.583          0.717          0.717          0.523           0.618           0.631
+gather_scatter             0.241          0.691          0.691          0.089           0.420           0.474
+scatter_gather             0.593          0.598          0.598          0.061           0.427           0.427
+cycle                      0.559          0.508          0.508          0.522           0.442           0.429
+random                     0.296          0.304          0.304          0.365           0.368           0.371
+layering                   0.091          0.073          0.073          0.075           0.065           0.062
+unclassified               0.858          0.872          0.872          0.801           0.844           0.851
+MACRO (7 patterns)         0.420          0.499          0.499          0.308           0.422           0.431

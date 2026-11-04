@@ -130,17 +130,21 @@ def reject_reason():
 
 
 def write(df, name, partitions=("dataset", "week")):
-    df = df.repartition(*partitions)
+    # Rebalance, not repartition: one task per WEEK left most cores idle while writing;
+    # rebalance lets AQE split big weeks across tasks and merge small ones.
+    df = df.hint("rebalance", *partitions)
     if "txn_time" in df.columns:
         df = df.sortWithinPartitions("txn_time")
     df.write.mode("overwrite").partitionBy(*partitions).parquet(f"{OUT}/{name}")
 
 
 def main():
-    df = (add_week(parse(read_raw()))
-          .withColumn("dataset", F.lit(DATASET))
-          .withColumn("reject_reason", reject_reason())
-          .cache())
+    # Cache BEFORE add_week: its first-week lookup is an action, and run on the uncached plan
+    # it parsed the whole CSV one extra time.
+    df = add_week(parse(read_raw())
+                  .withColumn("dataset", F.lit(DATASET))
+                  .withColumn("reject_reason", reject_reason())
+                  .cache())
 
     # ---- quarantine: rejected rows keep their original text values
     quarantine = (df.filter(F.col("reject_reason").isNotNull())
@@ -148,18 +152,20 @@ def main():
                             F.lit(RUN_AT).alias("loaded_at")))
 
     # ---- clean rows: drop exact duplicates, add txn_id and flags
-    key_cols = ["txn_time", "from_bank", "from_account", "to_bank", "to_account",
-                "amount_received", "receiving_currency", "amount_paid",
-                "payment_currency", "payment_format", "is_laundering"]
     good = df.filter(F.col("reject_reason").isNull())
-    clean = good.dropDuplicates(key_cols).withColumn("txn_id", txn_id_col())
 
-    # Two rows identical except for the label would share an id: suffix -2, -3 ...
+    # txn_id hashes every cleaned column except the label (time, banks, accounts, amounts,
+    # currencies, format), so ONE shuffle by txn_id does both jobs:
+    #   exact duplicates = same txn_id and same label (adjacent when ordered by label): keep one
+    #   two rows identical except for the label would share an id: suffix -2 (label 1 keeps the id)
     same_id = Window.partitionBy("txn_id").orderBy(F.col("is_laundering").desc())
-    clean = (clean.withColumn("_n", F.row_number().over(same_id))
+    clean = (good.withColumn("txn_id", txn_id_col())
+                  .withColumn("_dup", F.lag("is_laundering").over(same_id) == F.col("is_laundering"))
+                  .filter(~F.coalesce("_dup", F.lit(False)))
+                  .withColumn("_n", F.dense_rank().over(same_id))
                   .withColumn("txn_id", F.when(F.col("_n") == 1, F.col("txn_id"))
                                          .otherwise(F.concat_ws("-", "txn_id", F.col("_n").cast("string"))))
-                  .drop("_n")
+                  .drop("_dup", "_n")
                   .withColumn("is_self_transfer", (F.col("from_bank") == F.col("to_bank"))
                                                   & (F.col("from_account") == F.col("to_account")))
                   .withColumn("is_cross_currency", F.col("payment_currency") != F.col("receiving_currency"))
