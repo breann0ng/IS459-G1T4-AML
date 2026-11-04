@@ -16,7 +16,9 @@ Writes  analytics/final_results/     stage 1 metrics: payment and account-day le
         analytics/final_budget/      precision / recall if analysts review the top K per day
         analytics/final_patterns/    per pattern: laundering caught (payment + account-day level)
         analytics/final_schemes/     per scheme: caught?, when, share of its payments still to come
-        analytics/final_alert_rows/  every flagged account-day + its 78 account features (stage 2 input)
+        analytics/final_alert_rows/  every flagged account-day + its 78 account features (stage 2 input);
+                                     with alert expansion in meta.json, the expanded alerts (row
+                                     cutoff=expand<LOW> in final_results, caught_used in final_patterns)
         analytics/final_truth/       true laundering account-days per pattern (stage 2 recall base)
         analytics/final_flagged_payments/  flagged payments (for drill-down)
 """
@@ -35,7 +37,8 @@ ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Large"
 DATE_FROM = sys.argv[2] if len(sys.argv) > 2 else None    # optional: test on these dates only
 DATE_TO = sys.argv[3] if len(sys.argv) > 3 else None      # (inclusive), e.g. to fit a budget
-MODEL_DIR = f"{ROOT}/models/final"
+RUN = os.environ.get("AML_FINAL_RUN", "final")     # a named final run keeps its own models + tables
+MODEL_DIR = f"{ROOT}/models/{RUN}"
 TOP_K = [100, 250, 500, 1000, 2000, 5000]
 PATTERNS = ["fan_in", "fan_out", "gather_scatter", "scatter_gather", "cycle", "bipartite", "stack", "random"]
 BINS = 20000                                 # score histogram for PR-AUC
@@ -55,9 +58,14 @@ def text(path):
     return spark.sparkContext.wholeTextFiles(path).collect()[0][1]
 
 
+def table(name):
+    """final_results -> final_<RUN>_results for a named run (FINAL_NAME in rebuild_final.sh)."""
+    return name if RUN == "final" else f"final_{RUN}_{name[len('final_'):]}"
+
+
 def write(df, name, parts=("dataset",)):
     df.withColumn("dataset", F.lit(DATASET)).repartition(*parts).write.mode("overwrite") \
-      .partitionBy(*parts).parquet(f"{ANALYTICS}/{name}")
+      .partitionBy(*parts).parquet(f"{ANALYTICS}/{table(name)}")
 
 
 def prf(tp, alerts, pos):
@@ -162,13 +170,43 @@ def main():
     adj = (ad.join(acct.select("id", "date", "acct_bank", "acct", "label", "pattern_label", "first_laundering_ts"),
                    ["id", "date"], "inner").persist(DISK))
     evaluate("account_day", adj, "account-days")
+
+    # ---------------- alert expansion (follow the money, as train_txn.py --expand): a payment
+    # scoring >= LOW whose other end is an alert makes this end an alert too (same day)
+    low, hops = float(meta.get("expand") or 0), int(meta.get("expand_hops") or 1)
+    alert_ids = adj.filter(F.col("score") >= thr).select("id", "date")
+    if low:
+        e = sc.filter(F.col("score") >= low).select("s_id", "r_id", "date").persist(DISK)
+        for _ in range(hops):
+            new = (e.join(alert_ids.withColumnRenamed("id", "s_id"), ["s_id", "date"]).select(F.col("r_id").alias("id"), "date")
+                   .unionByName(e.join(alert_ids.withColumnRenamed("id", "r_id"), ["r_id", "date"])
+                                 .select(F.col("s_id").alias("id"), "date")))
+            alert_ids = alert_ids.unionByName(new).distinct()
+        alert_ids = alert_ids.join(adj.select("id", "date"), ["id", "date"]).persist(DISK)
+    adj = adj.join(alert_ids.withColumn("alert", F.lit(1)), ["id", "date"], "left").fillna(0, ["alert"]).persist(DISK)
+    if low:
+        pos = adj.filter("label = 1").count()
+        scheme = F.col("pattern_label").isin(PATTERNS).cast("int")
+        t = adj.agg(F.sum("alert").alias("a"), F.sum(F.col("alert") * F.col("label")).alias("tp"),
+                    F.sum(F.col("alert") * F.col("label") * scheme).alias("c"), F.sum(F.col("label") * scheme).alias("n"),
+                    F.sum(F.col("alert") * F.col("label") * (1 - scheme)).alias("cu"),
+                    F.sum(F.col("label") * (1 - scheme)).alias("nu")).first()
+        p, r, f = prf(t["tp"], t["a"], pos)
+        res.append({"level": "account_day", "cutoff": f"expand{low:g}", "threshold": thr, "units": "account-days",
+                    "alerts": int(t["a"]), "true_alerts": int(t["tp"]), "positives": pos, "precision": p,
+                    "recall": r, "f1": f, "alerts_per_day": t["a"] / days, "pr_auc": None,
+                    "recall_patterns": t["c"] / t["n"] if t["n"] else None,
+                    "recall_unclassified": t["cu"] / t["nu"] if t["nu"] else None})
+        print(f"[score] account_day + expansion (>= {low:g}): P {p:.3f} R {r:.3f} F1 {f:.3f} "
+              f"alerts/day {t['a'] / days:.0f}")
     pat_ad = (adj.filter("label = 1").groupBy("pattern_label")
                 .agg(F.count(F.lit(1)).alias("positives"),
-                     F.sum((F.col("score") >= thr).cast("int")).alias("caught"))
+                     F.sum((F.col("score") >= thr).cast("int")).alias("caught"),
+                     F.sum("alert").alias("caught_used"))
                 .withColumn("level", F.lit("account_day")))
 
-    # ---------------- stage 2 inputs: alerts with their account features; truth per pattern
-    alerts = adj.filter(F.col("score") >= thr).select("id", "date", "score")
+    # ---------------- stage 2 inputs: alerts (expanded when on) with their account features
+    alerts = adj.filter(F.col("alert") == 1).select("id", "date", "score")
     nf = meta["namer_account_features"]
     alert_rows = (alerts.join(acct.select("id", "date", "acct_bank", "acct", "label", "pattern_label",
                                           "first_laundering_ts", *nf), ["id", "date"]))
@@ -211,7 +249,7 @@ def main():
           f"{s['eod']} alerted (end of day) before the scheme ended")
 
     # ---------------- save the small tables
-    write(pat_pay.unionByName(pat_ad), "final_patterns")
+    write(pat_pay.withColumn("caught_used", F.col("caught")).unionByName(pat_ad), "final_patterns")
     d = daily_parts[0]
     for x in daily_parts[1:]:
         d = d.unionByName(x)

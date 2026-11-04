@@ -1,0 +1,66 @@
+/home/hadoop/pipeline/final_report.py:65: FutureWarning: Downcasting object dtype arrays on .fillna, .ffill, .bfill is deprecated and will change in a future version. Call result.infer_objects(copy=False) instead. To opt-in to the future behavior, set `pd.set_option('future.no_silent_downcasting', True)`
+  "alert_before_end_eod": float(sch["caught_before_end_eod"].fillna(False).astype(bool).mean())}
+=== HI-Large · STAGE 1 (frozen threshold 0.9763)
+      level           cutoff  alerts  true_alerts  positives  precision  recall    f1  alerts_per_day  pr_auc  recall_patterns  recall_unclassified
+    payment frozen_threshold   18761        16277      31631      0.868   0.515 0.646        1340.071   0.632            0.853                0.006
+    payment      top1000/day   14000        13488      31631      0.963   0.426 0.591        1000.000   0.632              NaN                  NaN
+account_day       top100/day    1400         1400      55060      1.000   0.025 0.050         100.000   0.662              NaN                  NaN
+account_day      top2000/day   28000        26809      55060      0.957   0.487 0.646        2000.000   0.662              NaN                  NaN
+    payment       top100/day    1400         1395      31631      0.996   0.044 0.084         100.000   0.632              NaN                  NaN
+    payment       top500/day    7000         6955      31631      0.994   0.220 0.360         500.000   0.632              NaN                  NaN
+    payment      top2000/day   28000        18033      31631      0.644   0.570 0.605        2000.000   0.632              NaN                  NaN
+account_day       top250/day    3500         3500      55060      1.000   0.064 0.120         250.000   0.662              NaN                  NaN
+account_day frozen_threshold   31714        28495      55060      0.898   0.518 0.657        2265.286   0.662            0.852                0.008
+account_day      top5000/day   70000        33910      55060      0.484   0.616 0.542        5000.000   0.662              NaN                  NaN
+account_day      top1000/day   14000        13992      55060      0.999   0.254 0.405        1000.000   0.662              NaN                  NaN
+    payment       top250/day    3500         3489      31631      0.997   0.110 0.199         250.000   0.632              NaN                  NaN
+    payment      top5000/day   70000        21463      31631      0.307   0.679 0.422        5000.000   0.632              NaN                  NaN
+account_day       top500/day    7000         6998      55060      1.000   0.127 0.226         500.000   0.662              NaN                  NaN
+account_day        expand0.9   32228        28743      55060      0.892   0.522 0.659        2302.000     NaN            0.859                0.009
+
+=== detection per pattern
+      level  pattern_label  positives  caught  recall  caught_used  recall_used
+account_day      bipartite       2974    2387   0.803         2387        0.803
+account_day          cycle       3174    2714   0.855         2739        0.863
+account_day         fan_in       3307    2882   0.871         2910        0.880
+account_day        fan_out       3058    2645   0.865         2657        0.869
+account_day gather_scatter       5041    4410   0.875         4472        0.887
+account_day         random       2493    2107   0.845         2123        0.852
+account_day scatter_gather       6475    5628   0.869         5705        0.881
+account_day          stack       6739    5550   0.824         5563        0.825
+account_day   unclassified      21799     172   0.008          187        0.009
+    payment      bipartite       1600    1287   0.804         1287        0.804
+    payment          cycle       1828    1568   0.858         1568        0.858
+    payment         fan_in       1869    1616   0.865         1616        0.865
+    payment        fan_out       1768    1542   0.872         1542        0.872
+    payment gather_scatter       3076    2684   0.873         2684        0.873
+    payment         random       1411    1200   0.850         1200        0.850
+    payment scatter_gather       3870    3361   0.868         3361        0.868
+    payment          stack       3563    2938   0.825         2938        0.825
+    payment   unclassified      12646      81   0.006           81        0.006
+
+=== schemes: caught and how early
+  pattern_type  schemes  caught  median_hours_to_first_flag  median_duration_h  share_from_first_flag alert_before_end_eod
+     bipartite      296   0.946                         0.0             25.742                  0.971              0.52669
+         cycle      318   0.934                         0.0              8.325                  0.966             0.466443
+        fan_in      303   0.898                         0.0              0.000                  0.980             0.430108
+       fan_out      294   0.922                         0.0              0.000                  0.968             0.442029
+gather_scatter      281   0.947                         0.0             20.817                  0.965             0.505618
+        random      281   0.904                         0.0              0.000                  0.970             0.373541
+scatter_gather      299   0.946                         0.0             61.383                  0.959             0.641115
+         stack      317   0.946                         0.0             56.783                  0.972             0.623762
+{'schemes': 2389, 'caught': 0.930514859773964, 'median_hours_to_first_flag': 0.0, 'median_duration_h': 17.25, 'share_from_first_flag': 0.9689771483988361, 'alert_before_end_eod': 0.4742570113017999}
+
+=== STAGE 2 END TO END (group namer)
+           pattern  true_cases  named_as  correct  precision  recall    f1
+             cycle        3174      1467      480      0.327   0.151 0.207
+            fan_in        3307      3033      930      0.307   0.281 0.293
+           fan_out        3058      3952     1348      0.341   0.441 0.385
+    gather_scatter        5041      3943     1426      0.362   0.283 0.317
+          layering        9713     13553     6640      0.490   0.684 0.571
+            random        2493      1197      384      0.321   0.154 0.208
+    scatter_gather        6475      2696      970      0.360   0.150 0.212
+      unclassified       21799      2387      124      0.052   0.006 0.010
+MACRO (7 patterns)       33261     29841    12178      0.358   0.306 0.313
+
+wrote dashboard_data_enrui_breann_mld20.json (run enrui_breann_mld20)

@@ -6,6 +6,7 @@ Laptop is fine (small tables only):
 """
 
 import json
+import os
 import sys
 
 import numpy as np
@@ -14,10 +15,11 @@ import pandas as pd
 import txn_report as R
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Large"
+RUN = os.environ.get("AML_FINAL_RUN", "final")     # a named final run: export AML_FINAL_RUN=<name> first
 
 
 def tbl(name):
-    t = R.load(name)
+    t = R.load(name if RUN == "final" else f"final_{RUN}_{name[len('final_'):]}")
     return t[t["dataset"] == DATASET].copy() if not t.empty and "dataset" in t else t
 
 
@@ -44,7 +46,11 @@ def main():
                "alerts_per_day", "pr_auc", "recall_patterns", "recall_unclassified"]].round(3).to_string(index=False))
     print("\n=== detection per pattern")
     p = pats.assign(recall=pats["caught"] / pats["positives"])
-    print(p[["level", "pattern_label", "positives", "caught", "recall"]].sort_values(["level", "pattern_label"]).round(3).to_string(index=False))
+    show = ["level", "pattern_label", "positives", "caught", "recall"]
+    if "caught_used" in p and (p["caught_used"] != p["caught"]).any():    # alert expansion on
+        p["recall_used"] = p["caught_used"] / p["positives"]
+        show += ["caught_used", "recall_used"]
+    print(p[show].sort_values(["level", "pattern_label"]).round(3).to_string(index=False))
 
     sch["caught"] = sch["caught"].astype(bool)
     by = sch.groupby("pattern_type").agg(schemes=("scheme_id", "count"), caught=("caught", "mean"),
@@ -87,9 +93,10 @@ def main():
                                              .rename("schemes").reset_index().assign(bucket=lambda d: d.iloc[:, 0].astype(str)))[["bucket", "schemes"]]),
            "stage2": clean(st2) if not st2.empty else [], "confusion": conf, "example_groups": examples,
            "alerts_by_predicted_pattern": alerts_by_pred}
-    with open("dashboard_data.json", "w") as f:
+    out_file = "dashboard_data.json" if RUN == "final" else f"dashboard_data_{RUN}.json"
+    with open(out_file, "w") as f:
         json.dump(out, f, indent=1, default=str)
-    print("\nwrote dashboard_data.json")
+    print(f"\nwrote {out_file} (run {RUN})")
 
 
 if __name__ == "__main__":

@@ -101,7 +101,15 @@ def load_table(name, flt=None):
     """Read an analytics table, merging schemas of older and newer runs."""
     fs, path = fs_path(f"{ANALYTICS}/{name}")
     d = ds.dataset(path, filesystem=fs, format="parquet", partitioning="hive")
-    schema = pa.unify_schemas([plain(f.physical_schema) for f in d.get_fragments()] + [plain(d.schema)])
+    schemas = [plain(f.physical_schema) for f in d.get_fragments()] + [plain(d.schema)]
+    types = {}                              # a column saved as int in old runs and float in new ones -> float
+    for s in schemas:
+        for f in s:
+            types.setdefault(f.name, set()).add(f.type)
+    num = lambda t: pa.types.is_integer(t) or pa.types.is_floating(t)
+    mixed = {n for n, ts in types.items() if len(ts) > 1 and all(map(num, ts))}
+    schema = pa.unify_schemas([pa.schema([pa.field(f.name, pa.float64()) if f.name in mixed else f for f in s])
+                               for s in schemas])
     return ds.dataset(path, filesystem=fs, format="parquet", partitioning="hive",
                       schema=schema).to_table(filter=flt).to_pandas()
 

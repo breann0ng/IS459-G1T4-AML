@@ -85,24 +85,32 @@ def build_groups(nodes, payments):
 ONWARD_DAYS = 2                  # how long after receiving an outside account may pass the money on
 
 
-def _scan(dataset, start, end, mask):
-    """Payments of one dataset in [start, end] whose raw rows pass mask(batch)."""
+def _scan(dataset, start, end, mask, keep, full=None):
+    """Payments of one dataset in [start, end] whose raw rows pass mask(batch) and keep(rows).
+    Returns only src / dst / date (enough for the context features: keeps HI-Large in memory),
+    plus, with full(rows), those rows with every column."""
     tx = S.open_dataset(f"{S.CURATED}/transactions")
     flt = ((ds.field("dataset") == dataset)
            & (ds.field("txn_date") >= pa.scalar(start, pa.date32()))
            & (ds.field("txn_date") <= pa.scalar(end, pa.date32())))
     cols = ["txn_time", "txn_date", "from_bank", "from_account", "to_bank", "to_account",
             "amount_paid", "payment_currency", "payment_format"]
-    out = [b.filter(mask(b)).to_pandas() for b in tx.scanner(columns=cols, filter=flt, batch_size=S.BATCH_SIZE,
-                                                             batch_readahead=1, fragment_readahead=1).to_batches()
-           if b.num_rows]
-    p = pd.concat([o for o in out if len(o)], ignore_index=True) if any(len(o) for o in out) \
-        else pd.DataFrame(columns=cols)
-    p["src"], p["dst"] = S.key(p["from_bank"], p["from_account"]), S.key(p["to_bank"], p["to_account"])
-    p = p[p["src"] != p["dst"]].copy()
-    p["date"] = pd.to_datetime(p["txn_date"]).dt.date
-    p["amount_paid"] = p["amount_paid"].astype(float)
-    return p
+    slim, wide = [], []
+    for b in tx.scanner(columns=cols, filter=flt, batch_size=S.BATCH_SIZE,
+                        batch_readahead=1, fragment_readahead=1).to_batches():
+        b = b.filter(mask(b)) if b.num_rows else b
+        if not b.num_rows:
+            continue
+        p = b.to_pandas()
+        p["src"], p["dst"] = S.key(p["from_bank"], p["from_account"]), S.key(p["to_bank"], p["to_account"])
+        p = p[(p["src"] != p["dst"]) & keep(p)].copy()
+        p["date"] = pd.to_datetime(p["txn_date"]).dt.date
+        p["amount_paid"] = p["amount_paid"].astype(float)
+        slim.append(p[["src", "dst", "date"]])
+        if full is not None:
+            wide.append(p[full(p)])
+    cat = lambda parts, c: pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=c)
+    return cat(slim, ["src", "dst", "date"]), cat(wide, cols + ["src", "dst", "date"])
 
 
 def context_for(rows):
@@ -110,21 +118,22 @@ def context_for(rows):
     inner = payments with BOTH ends among the rows' accounts (exactly S.payments_for: the groups
             are built from these, so they do not change);
     hop1  = every payment with at least one end among them (money entering / leaving the group);
-    hop2  = onward payments of the outside accounts that received money from them."""
+    hop2  = onward payments of the outside accounts that received money from them
+            (hop1 / hop2: src, dst, date only; hop2 without repeats)."""
     out = {}
     for d, r in rows.groupby("dataset"):
         accts = set(S.key(r["acct_bank"], r["acct"]))
         start, end = min(r["date"]), max(r["date"])
         names = pa.array(sorted({a.split("|", 1)[1] for a in accts}))
-        hop1 = _scan(d, start, end, lambda b: pc.or_(pc.is_in(b["from_account"], names),
-                                                     pc.is_in(b["to_account"], names)))
-        s_in, d_in = hop1["src"].isin(accts), hop1["dst"].isin(accts)
-        hop1 = hop1[s_in | d_in]
-        inner = hop1[hop1["src"].isin(accts) & hop1["dst"].isin(accts)]
+        hop1, inner = _scan(d, start, end,
+                            lambda b: pc.or_(pc.is_in(b["from_account"], names), pc.is_in(b["to_account"], names)),
+                            keep=lambda p: p["src"].isin(accts) | p["dst"].isin(accts),
+                            full=lambda p: p["src"].isin(accts) & p["dst"].isin(accts))
         outside = set(hop1.loc[hop1["src"].isin(accts) & ~hop1["dst"].isin(accts), "dst"])
         names2 = pa.array(sorted({a.split("|", 1)[1] for a in outside}))
-        hop2 = _scan(d, start, end + dt.timedelta(days=ONWARD_DAYS), lambda b: pc.is_in(b["from_account"], names2))
-        hop2 = hop2[hop2["src"].isin(outside)]
+        hop2, _ = _scan(d, start, end + dt.timedelta(days=ONWARD_DAYS), lambda b: pc.is_in(b["from_account"], names2),
+                        keep=lambda p: p["src"].isin(outside))
+        hop2 = hop2.drop_duplicates()
         print(f"[context] {d}: {len(inner)} inner payments, {len(hop1) - len(inner)} in/out of the accounts, "
               f"{len(hop2)} onward payments of {len(outside)} outside receivers")
         out[d] = (inner, hop1, hop2)

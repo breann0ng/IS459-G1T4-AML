@@ -6,6 +6,12 @@
 #   export AML_BUCKET=<your bucket name>
 #   nohup bash rebuild_final.sh > rebuild.log 2>&1 &
 #   TRAIN_ONLY=1 nohup bash rebuild_final.sh > rebuild.log 2>&1 &     experiments: no HI-Large
+#   DATA_ONLY=1 nohup bash rebuild_final.sh > rebuild.log 2>&1 &      load HI-Large + build its test-window
+#                                                                     features, stop before any model runs
+#   FINAL_S1=txn_v3m_xp FINAL_GRP=s2_xp_ctx_vote_grp nohup bash rebuild_final.sh ...
+#                                     final run with that validated stage 1 + stage 2 setup
+#   FINAL_NAME=<name> ...            keep this final run apart: models/<name>, analytics/final_<name>_*,
+#                                     its own progress markers (other final runs are not touched)
 #
 # Needs: ~/.kaggle/kaggle.json (legacy token), Java 17 on PATH, all scripts in this folder,
 #        and the cluster created with the bootstrap action s3://<bucket>/scripts/install_libs.sh
@@ -13,6 +19,7 @@
 BUCKET="${AML_BUCKET:?set AML_BUCKET first, e.g. export AML_BUCKET=pw-aml-g1t4-b}"
 export AML_ROOT="s3://$BUCKET"
 P="$AML_ROOT/progress/rebuild"
+X=""; [ -n "$FINAL_NAME" ] && { export AML_FINAL_RUN="$FINAL_NAME"; X="_$FINAL_NAME"; }
 WINDOW_FROM=2022-09-12          # HI-Large test window (Monday to Sunday, two weeks)
 WINDOW_TO=2022-09-25
 KAGGLE=https://www.kaggle.com/api/v1/datasets/download/ealtman2019/ibm-transactions-for-anti-money-laundering-aml
@@ -75,15 +82,20 @@ if [ -n "$TRAIN_ONLY" ]; then
   echo "=== $(date '+%m-%d %H:%M') TRAIN_ONLY done: baselines txn_v3m + txn_v3m_grp saved, HI-Large not touched"
   exit 0
 fi
-step final_train  python3 -u final_train.py txn_v3m
-# 6. HI-Large test window (each chunk reads 21 days of history before it)
+# 5. HI-Large test window (each chunk reads 21 days of history before it)
 step feat_large   $SUBMIT build_features_spark.py HI-Large $WINDOW_FROM $WINDOW_TO
 step txn_large    $SUBMIT build_txn_features_spark.py HI-Large features_v2 $WINDOW_FROM $WINDOW_TO
 step v3_large     $SUBMIT build_features_v3_spark.py HI-Large $WINDOW_FROM $WINDOW_TO
+if [ -n "$DATA_ONLY" ]; then
+  echo "=== $(date '+%m-%d %H:%M') DATA_ONLY done: HI-Large loaded, test window $WINDOW_FROM to $WINDOW_TO built"
+  exit 0
+fi
+# 6. frozen models
+step final_train$X  python3 -u final_train.py ${FINAL_S1:-txn_v3m} ${FINAL_GRP}
 # 7. score in Spark: LightGBM / pyarrow are installed on every node by the bootstrap action
 #    (install_libs.sh), so the executors use the normal python3
-step score  $SUBMIT --conf spark.pyspark.python=/usr/bin/python3 --conf spark.pyspark.driver.python=/usr/bin/python3 --conf spark.executor.memory=5g --conf spark.executor.memoryOverhead=4g \
+step score$X  $SUBMIT --conf spark.pyspark.python=/usr/bin/python3 --conf spark.pyspark.driver.python=/usr/bin/python3 --conf spark.executor.memory=5g --conf spark.executor.memoryOverhead=4g \
             score_final_spark.py HI-Large $WINDOW_FROM $WINDOW_TO
-step name   python3 -u final_group_namer.py HI-Large
+step name$X   python3 -u final_group_namer.py HI-Large
 echo "=== $(date '+%m-%d %H:%M') ALL DONE: terminate the cluster now"
 # Laptop:  set AML_ROOT=s3://<bucket>   then   python final_report.py HI-Large > final_report.txt

@@ -4,6 +4,9 @@ Final run, step 1 of 3: retrain the FROZEN setup and save it to S3 (nothing is t
 
 Plain Python on the EMR primary node (needs train_txn.py, group_stage2.py, scheme_stage2.py):
     python3 final_train.py                       uses the validated run txn_v3m
+    python3 final_train.py txn_v3m_xp s2_xp_ctx_vote_grp
+                    stage 1 run (threshold + alert expansion) and the group_stage2.py run whose
+                    settings the namer copies (params, keep rates, linking, context, group vote)
 
 Frozen setup (chosen on HI-Small + HI-Medium validation, never on HI-Large)
     stage 1   payment model: LightGBM preset p3, 179 features (txn_features_v3),
@@ -17,6 +20,7 @@ Next    spark-submit [confs] score_final_spark.py HI-Large        (scores every 
 """
 
 import json
+import os
 import sys
 import math
 import time
@@ -31,9 +35,10 @@ import group_stage2 as G
 import scheme_stage2 as S
 
 VALIDATED_RUN = sys.argv[1] if len(sys.argv) > 1 else "txn_v3m"
+GROUP_RUN = sys.argv[2] if len(sys.argv) > 2 else None    # None = group_stage2.py defaults
 TXN_TABLE, ACCT_TABLE = "txn_features_v3", "features_v3"
 MERGE = {"bipartite": "layering", "stack": "layering"}
-MODEL_DIR = f"{T.ROOT}/models/final"
+MODEL_DIR = f"{T.ROOT}/models/{os.environ.get('AML_FINAL_RUN', 'final')}"   # FINAL_NAME in rebuild_final.sh
 
 
 def put_text(path, text):
@@ -49,8 +54,24 @@ def main():
     res = S.load_table("txn_results", ds.field("config") == VALIDATED_RUN)
     thr = float(res["threshold_val_best_f1"].iloc[0])
     train_end = {k: pd.Timestamp(v).date() for k, v in json.loads(res["train_end_dates"].iloc[0]).items()}
-    print(f"[final] frozen from {VALIDATED_RUN}: threshold {thr:.4f}, train end "
-          f"{ {k: str(v) for k, v in train_end.items()} }")
+    expand = float(res["expand"].dropna().iloc[0]) if "expand" in res and res["expand"].notna().any() else 0.0
+    hops = int(res["expand_hops"].dropna().iloc[0]) if expand and "expand_hops" in res else 1
+    print(f"[final] frozen from {VALIDATED_RUN}: threshold {thr:.4f}, alert expansion {expand or 'off'}, "
+          f"train end { {k: str(v) for k, v in train_end.items()} }")
+
+    # ---- stage 2 settings: copied from the chosen group_stage2.py validation run
+    st = {"context": False, "group_vote": False}
+    if GROUP_RUN:
+        g = S.load_table("group_stage2", ds.field("config") == GROUP_RUN)
+        if g.empty:
+            raise SystemExit(f"No analytics/group_stage2 for {GROUP_RUN}")
+        st = {**st, **json.loads(g["settings_json"].iloc[0])}
+        if g["stage1_config"].iloc[0] != VALIDATED_RUN:
+            print(f"WARNING: {GROUP_RUN} named the alerts of {g['stage1_config'].iloc[0]}, not {VALIDATED_RUN}")
+        S.STAGE2_PARAMS.update(st["namer_params"])
+        G.KEEP_RATES, G.HUB_DEGREE = st["keep_rates"], st["hub_degree"]
+        G.MAX_LINKED_DAYS, S.LINK_DAYS = st["max_linked_days"], st["link_days"]
+    print(f"[final] stage 2 from {GROUP_RUN or 'defaults'}: {json.dumps(st)}")
 
     # ---- stage 1: payment model (same data, features, settings and seed as the validated run)
     sd = T.open_dataset(f"{T.CURATED}/{TXN_TABLE}_sample")
@@ -77,13 +98,13 @@ def main():
     a["date"] = pd.to_datetime(a["date"]).dt.date
     a = a[[dt_ <= train_end[d] for d, dt_ in zip(a["dataset"], a["date"])]].reset_index(drop=True)
     f2 = [c for c in a.columns if c not in S.META]
-    pays = S.payments_for(a)
+    pays = G.context_for(a) if st["context"] else S.payments_for(a)
     copies = []
     for i, k in enumerate(G.KEEP_RATES):
         part = a if k >= 1 else a.sample(frac=k, random_state=G.SEED + i)
         copies.append(G.with_groups(part, pays, f"train keep={k:.0%}"))
     tr2 = pd.concat(copies, ignore_index=True)
-    gcols = [c for c in tr2.columns if c.startswith(("g_", "r_"))]
+    gcols = [c for c in tr2.columns if c.startswith(("g_", "r_", "c_", "rc_"))]
     y = S.true_class(tr2, MERGE).to_numpy()
     namer = S.fit(tr2[f2 + gcols].fillna(0.0).to_numpy(np.float32), y)
     put_text(f"{MODEL_DIR}/namer_group.txt", namer.booster_.model_to_string())
@@ -97,7 +118,10 @@ def main():
             "namer_features": f2 + gcols, "namer_account_features": f2, "namer_group_features": gcols,
             "namer_classes": [str(c) for c in namer.classes_], "merge": MERGE,
             "keep_rates": G.KEEP_RATES, "hub_degree": G.HUB_DEGREE,
-            "max_linked_days": G.MAX_LINKED_DAYS, "trained_at": T.RUN_AT}
+            "max_linked_days": G.MAX_LINKED_DAYS, "link_days": S.LINK_DAYS,
+            "expand": expand, "expand_hops": hops, "group_run": GROUP_RUN,
+            "context": bool(st["context"]), "group_vote": bool(st["group_vote"]),
+            "namer_params": S.STAGE2_PARAMS, "trained_at": T.RUN_AT}
     put_text(f"{MODEL_DIR}/meta.json", json.dumps(meta, indent=1, default=str))
     print(f"[final] saved models/final/ (stage1.txt, namer_group.txt, meta.json) in {time.time() - t0:.0f}s")
 
