@@ -132,7 +132,7 @@ def reject_reason():
 def write(df, name, partitions=("dataset", "week")):
     # Rebalance, not repartition: one task per WEEK left most cores idle while writing;
     # rebalance lets AQE split big weeks across tasks and merge small ones.
-    df = df.hint("rebalance", *partitions)
+    df = df.repartition(*partitions)   # Spark 3.5 (EMR 7): .hint("rebalance", cols) is not supported in PySpark
     if "txn_time" in df.columns:
         df = df.sortWithinPartitions("txn_time")
     df.write.mode("overwrite").partitionBy(*partitions).parquet(f"{OUT}/{name}")

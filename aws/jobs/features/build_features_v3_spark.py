@@ -194,8 +194,8 @@ def main():
         f = in_chunk(spark.read.parquet(f"{CURATED}/{src_t}").filter(F.col("dataset") == DATASET))
         f = f.join(extras, ["acct_bank", "acct", "date"], "left").fillna(
             {c: v for c, v in fill.items()})
-        # rebalance: AQE splits big weeks across tasks and merges small ones
-        f.hint("rebalance", "dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
+        # repartition by (dataset, week): PySpark 3.5 / EMR 7 rejects .hint("rebalance", <columns>)
+        f.repartition("dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
          .parquet(f"{CURATED}/{out_t}")
     chunk = f" {CHUNK_FROM} to {CHUNK_TO}" if CHUNK_FROM else ""
     print(f"[v3] {DATASET}{chunk}: wrote {OUT_FEATURES} (+_sample): {SRC_FEATURES} + {len(extra_cols)} columns")
@@ -227,7 +227,7 @@ def main():
         q = (q.join(p, "txn_id", "left").join(sx, ["s_id", "date"], "left").join(rx, ["r_id", "date"], "left")
               .fillna({**sfill, "t_same_owner": 0.0, "t_cross_country": 0.0, "t_amt_vs_sender": 0.0,
                        "t_amt_vs_receiver": 0.0, "t_sender_new": 0.0}))
-        q.hint("rebalance", "dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
+        q.repartition("dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
          .parquet(f"{CURATED}/{out_t}")
     n_same = p.filter("t_same_owner = 1").count()
     print(f"[v3] {DATASET}{chunk}: wrote {OUT_TXN} (+_sample): {SRC_TXN} + 5 payment + {2 * len(extra_cols)} "

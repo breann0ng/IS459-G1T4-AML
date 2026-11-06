@@ -454,12 +454,12 @@ def main():
     features = features.persist(DISK)
 
     path = f"{CURATED}/{FEATURES_TABLE}"
-    # rebalance, not repartition: by week alone one task wrote each week while the other cores
-    # idled; rebalance lets AQE split big weeks across tasks and merge small ones
-    features.hint("rebalance", "dataset", "week").write.mode("overwrite") \
+    # repartition by (dataset, week) before the partitioned write. (.hint("rebalance", "dataset", "week")
+    # would let AQE split big weeks, but PySpark 3.5 / EMR 7 rejects hint columns: every write crashed.)
+    features.repartition("dataset", "week").write.mode("overwrite") \
             .partitionBy("dataset", "week").parquet(path)
     sample = features.filter((F.col("label") == 1) | (F.rand(RANDOM_SEED) < NEG_SAMPLE_RATE))
-    sample.hint("rebalance", "dataset", "week").write.mode("overwrite") \
+    sample.repartition("dataset", "week").write.mode("overwrite") \
           .partitionBy("dataset", "week").parquet(f"{CURATED}/{FEATURES_TABLE}_sample")
 
     by_label = {r["label"]: r["count"] for r in features.groupBy("label").count().collect()}
