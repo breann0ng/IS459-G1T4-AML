@@ -9,7 +9,8 @@
 # and models/final_nofan (same recipe, fan-in / fan-out left out: final_train.py txn_v3m_nofan
 # --exclude-patterns fan_in,fan_out --model-dir models/final_nofan --stage1-only).
 #
-# On the EMR primary node, all scripts in ONE folder (aws/jobs/*/* + local/legacy-emr/* flattened):
+# On the EMR primary node, all scripts in ONE folder (aws/jobs/*/*, aws/jobs/bq2/tasha/* and
+# local/legacy-emr/* flattened; aws/deploy/deploy.sh builds exactly that in build/jobs/):
 #   export AML_BUCKET=<bucket>
 #   setsid nohup bash run_bq2_ibm.sh > run_bq2_ibm.log 2>&1 < /dev/null &
 #   tail -f run_bq2_ibm.log
@@ -93,4 +94,4 @@ step bq2i_prep      env BQ2_HIDE=$HIDE BQ2_HIDE_BEFORE=$INTRO $SCORE_SUBMIT bq2_
 step bq2i_eval      env BQ2_EMERGING=$HIDE BQ2_FIRST_DOSE=$INTRO $PY -u bq2_part2_eval.py HI-Large
 step bq2i_eval_nt   env BQ2_EMERGING=$HIDE BQ2_FIRST_DOSE=$INTRO $PY -u bq2_part2_eval.py HI-Large-NT
 echo "=== $(date '+%m-%d %H:%M') ALL DONE: terminate the cluster now"
-# Laptop:  export AML_ROOT=s3://<bucket>   then   python3 local/reports/bq2_ibm_report.py
+# Laptop:  export AML_ROOT=s3://<bucket>   then   python3 aws/jobs/bq2/tasha/bq2_ibm_report.py

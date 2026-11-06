@@ -9,7 +9,7 @@ export AWS_REGION="${AWS_REGION:-us-east-1}"
 cd "$(dirname "$0")/../.."
 [ "$(git branch --show-current)" = "main" ] || { echo "deploy from main only"; exit 1; }
 rm -rf build && mkdir -p build/jobs
-cp aws/jobs/*/*.py aws/jobs/*/*.sh build/jobs/ 2>/dev/null || true
+cp aws/jobs/*/*.py aws/jobs/*/*.sh aws/jobs/*/*/*.py aws/jobs/*/*/*.sh build/jobs/ 2>/dev/null || true   # incl. per-person subfolders (bq2/tasha/)
 ( cd build/jobs && zip -qj ../jobs.zip *.py )
 aws s3 sync build/jobs/ "s3://$BUCKET/jobs/" --delete --exclude "jobs.zip" --exclude "venv.tar.gz"
 aws s3 cp build/jobs.zip "s3://$BUCKET/jobs/jobs.zip"

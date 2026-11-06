@@ -2,7 +2,7 @@
 bq2_ibm_report.py                                                        (BQ2, HI-Large tab report)
 Laptop (lab on), after run_bq2_ibm.sh. Reads only the small result tables:
     export AML_ROOT=s3://<bucket>   (Windows: set AML_ROOT=s3://<bucket>)
-    python3 local/reports/bq2_ibm_report.py > results/bq2/bq2_ibm_report.txt
+    python3 aws/jobs/bq2/tasha/bq2_ibm_report.py > results/bq2/bq2_ibm_report.txt
 Writes app/data/bq2_ibm_data.json for the HI-Large tab of app/app_bq2.py:
     part1      Joey's Part 1 on HI-Large: real data, and the new-tactic test (tag _nt)
     part2      Joey's Part 2 rules (bq2_part2_eval.py) on HI-Large (v0 = BQ1 model) and on
@@ -14,12 +14,13 @@ import sys
 
 import pandas as pd
 
-_JOBS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "aws", "jobs")
+_HERE = os.path.dirname(os.path.abspath(__file__))                     # aws/jobs/bq2/tasha/
+_JOBS = os.path.join(_HERE, "..", "..")
 sys.path[:0] = [os.path.join(_JOBS, d) for d in ("bq2", "bq1", "features", "clean", "load")]
 import bq2_common as C   # noqa: E402  (storage helpers; no train_txn.py needed on the laptop)
 
 DS, NT = "HI-Large", "HI-Large-NT"
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "app", "data", "bq2_ibm_data.json")
+OUT = os.path.join(_HERE, "..", "..", "..", "..", "app", "data", "bq2_ibm_data.json")
 
 
 def load(name, ds_):

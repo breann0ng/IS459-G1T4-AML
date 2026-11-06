@@ -203,7 +203,7 @@ def load_ibm():
 
 def ibm_test_section():
     """HI-Large: Joey's Part 1 + Part 2 on our data, and the fan-in / fan-out new-tactic test
-    (data/bq2_ibm_data.json, written by local/reports/bq2_ibm_report.py after run_bq2_ibm.sh)."""
+    (data/bq2_ibm_data.json, written by aws/jobs/bq2/tasha/bq2_ibm_report.py after run_bq2_ibm.sh)."""
     J = load_ibm()
     if not J:
         return
