@@ -58,6 +58,14 @@ RAW_COLS = ["ts_raw", "from_bank_raw", "from_account", "to_bank_raw", "to_accoun
             "payment_currency", "payment_format", "is_laundering_raw"]
 
 spark = SparkSession.builder.appName(f"CleanTransactions-{DATASET}").getOrCreate()
+
+
+def rebalance(df, *cols):
+    """REBALANCE hint in SQL form: works on Spark 3.2+ (EMR 7, local 3.5) and 4.x (EMR Serverless 8).
+    df.hint("rebalance", "col", ...) only works on Spark 4 (3.5 passes the names as strings and fails)."""
+    view = f"_rebalance_{id(df)}"
+    df.createOrReplaceTempView(view)
+    return spark.sql(f"SELECT /*+ REBALANCE({', '.join(cols)}) */ * FROM {view}")
 spark.sparkContext.setLogLevel("WARN")      # keep logs small: warnings and errors only
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
@@ -132,7 +140,7 @@ def reject_reason():
 def write(df, name, partitions=("dataset", "week")):
     # Rebalance, not repartition: one task per WEEK left most cores idle while writing;
     # rebalance lets AQE split big weeks across tasks and merge small ones.
-    df = df.repartition(*partitions)   # Spark 3.5 (EMR 7): .hint("rebalance", cols) is not supported in PySpark
+    df = rebalance(df, *partitions)
     if "txn_time" in df.columns:
         df = df.sortWithinPartitions("txn_time")
     df.write.mode("overwrite").partitionBy(*partitions).parquet(f"{OUT}/{name}")

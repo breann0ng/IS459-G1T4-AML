@@ -60,6 +60,14 @@ META = ["dataset", "week", "acct_bank", "acct", "date", "label", "first_launderi
 FORMATS = ["ACH", "Bitcoin", "Cash", "Cheque", "Credit Card", "Reinvestment", "Wire"]
 
 spark = SparkSession.builder.appName(f"BuildTxnFeatures-{DATASET}").getOrCreate()
+
+
+def rebalance(df, *cols):
+    """REBALANCE hint in SQL form: works on Spark 3.2+ (EMR 7, local 3.5) and 4.x (EMR Serverless 8).
+    df.hint("rebalance", "col", ...) only works on Spark 4 (3.5 passes the names as strings and fails)."""
+    view = f"_rebalance_{id(df)}"
+    df.createOrReplaceTempView(view)
+    return spark.sql(f"SELECT /*+ REBALANCE({', '.join(cols)}) */ * FROM {view}")
 spark.sparkContext.setLogLevel("WARN")
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 spark.conf.set("spark.sql.adaptive.enabled", "true")
@@ -138,13 +146,13 @@ def main():
     out = out.fillna(0.0).persist()
 
     sample = out.filter((F.col("label") == 1) | (F.rand(RANDOM_SEED) < NEG_SAMPLE_RATE))
-    # repartition by (dataset, week) before the partitioned write. (.hint("rebalance", "dataset", "week")
-    # would let AQE split big weeks, but PySpark 3.5 / EMR 7 rejects hint columns: every write crashed.)
-    sample.repartition("dataset", "week").write.mode("overwrite") \
+    # rebalance, not repartition: by week alone one task wrote each week while the other cores
+    # idled; rebalance lets AQE split big weeks across tasks and merge small ones
+    rebalance(sample, "dataset", "week").write.mode("overwrite") \
           .partitionBy("dataset", "week").parquet(f"{CURATED}/txn_features_sample")
     full_from = FULL_FROM.get(DATASET)
     full = out.filter(F.col("date") >= F.lit(full_from).cast("date")) if full_from else out
-    full.repartition("dataset", "week").write.mode("overwrite") \
+    rebalance(full, "dataset", "week").write.mode("overwrite") \
         .partitionBy("dataset", "week").parquet(f"{CURATED}/txn_features")
 
     n = out.count()

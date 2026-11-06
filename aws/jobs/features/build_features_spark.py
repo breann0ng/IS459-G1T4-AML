@@ -106,6 +106,14 @@ DAY = 86400
 DISK = StorageLevel.MEMORY_AND_DISK
 
 spark = SparkSession.builder.appName(f"BuildFeatures-{DATASET}").getOrCreate()
+
+
+def rebalance(df, *cols):
+    """REBALANCE hint in SQL form: works on Spark 3.2+ (EMR 7, local 3.5) and 4.x (EMR Serverless 8).
+    df.hint("rebalance", "col", ...) only works on Spark 4 (3.5 passes the names as strings and fails)."""
+    view = f"_rebalance_{id(df)}"
+    df.createOrReplaceTempView(view)
+    return spark.sql(f"SELECT /*+ REBALANCE({', '.join(cols)}) */ * FROM {view}")
 spark.sparkContext.setLogLevel("WARN")      # keep logs small: warnings and errors only
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 spark.conf.set("spark.sql.adaptive.enabled", "true")
@@ -454,12 +462,12 @@ def main():
     features = features.persist(DISK)
 
     path = f"{CURATED}/{FEATURES_TABLE}"
-    # repartition by (dataset, week) before the partitioned write. (.hint("rebalance", "dataset", "week")
-    # would let AQE split big weeks, but PySpark 3.5 / EMR 7 rejects hint columns: every write crashed.)
-    features.repartition("dataset", "week").write.mode("overwrite") \
+    # rebalance, not repartition: by week alone one task wrote each week while the other cores
+    # idled; rebalance lets AQE split big weeks across tasks and merge small ones
+    rebalance(features, "dataset", "week").write.mode("overwrite") \
             .partitionBy("dataset", "week").parquet(path)
     sample = features.filter((F.col("label") == 1) | (F.rand(RANDOM_SEED) < NEG_SAMPLE_RATE))
-    sample.repartition("dataset", "week").write.mode("overwrite") \
+    rebalance(sample, "dataset", "week").write.mode("overwrite") \
           .partitionBy("dataset", "week").parquet(f"{CURATED}/{FEATURES_TABLE}_sample")
 
     by_label = {r["label"]: r["count"] for r in features.groupBy("label").count().collect()}
