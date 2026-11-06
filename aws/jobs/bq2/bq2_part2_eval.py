@@ -175,9 +175,12 @@ def main():
         if NEXT in set(sc["version"]) and dec.get("deploy_from"):
             d = dec["deploy_from"]
             both = sc[(sc["date"] >= pd.Timestamp(d)) & sc["version"].isin([VERSION, NEXT])]
+            if both.empty:      # deployed after the last scored day (e.g. HI-Large): nothing to compare yet
+                print(f"\n[eval] recovery: {NEXT} would go live on {d}, after the last scored day")
+                return
             cmp = (both[both["label"]].groupby(["version", "group"])["alert"].mean().unstack("group"))
-            cmp["precision"] = both.groupby("version").apply(
-                lambda g: (g["alert"] & g["label"]).sum() / max(g["alert"].sum(), 1))
+            cmp["precision"] = pd.Series({v: (g["alert"] & g["label"]).sum() / max(g["alert"].sum(), 1)
+                                          for v, g in both.groupby("version")})
             print(f"\n[eval] recovery: {VERSION} vs {NEXT} on the same weeks, from {d}")
             print(cmp.round(3).to_string())
             print(ty[ty["period"] == "after deploy"].pivot_table(index=["group", "typology"], columns="version",

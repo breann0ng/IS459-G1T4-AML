@@ -34,6 +34,27 @@ This is a **controlled test**: the change in SAML-R is one we built in, so it sh
 | 8 | `bq2_ramp_report.py` | laptop | results → `results/bq2/bq2_ramp_report.txt` + `app/data/bq2_data.json` |
 | — | `bq2_common.py` | — | shared settings: emerging typologies, dates, doses, alert rules |
 
+## HI-Large tab: Joey's method on IBM + the fan-in / fan-out new-tactic test (Tasha)
+
+HI-Large's tactics do not change, so on top of Part 1 on the real data we test a **held-out pattern**: fan-in and
+fan-out laundering are left out of every week before 3 Oct 2022 (Week 10), so they appear as a brand-new tactic.
+The bank's model then is the BQ1 stage 1 recipe trained **without** them (`models/final_nofan`); the BQ1 final
+model (`models/final`, `final_train.py txn_v3m`, the same stage 1 as the En Rui + Breann final run) shows what
+retraining with the confirmed cases gives. Both are graded with the **same** Part 1 and Part 2 rules as SAML-D.
+
+| Step | Script | Does |
+|---|---|---|
+| — | `local/legacy-emr/run_bq2_ibm.sh` | runs everything below; resumable (`progress/bq2/`) |
+| 1 | `bq2_ibm_score_spark.py` | per week: features (unchanged BQ1 steps) + scores with both models (Spark: ~13M payments a week) |
+| 2 | `bq2_part1_tactics_spark.py` | Part 1 on HI-Large, real data, then with `BQ2_HIDE=fan_in,fan_out BQ2_HIDE_BEFORE=2022-10-03` (tag `_nt`) |
+| 3 | `bq2_ibm_part2_prep_spark.py` | scores in Part 2's format (`analytics/bq2r_scores`, datasets `HI-Large` and `HI-Large-NT`) and each model's validation baseline (`models/bq2r/<ds>/<v>/meta.json`, HI-Small + HI-Medium validation days) |
+| 4 | `bq2_part2_eval.py` | Joey's rules R1-R3, unchanged (`BQ2_EMERGING=fan_in,fan_out BQ2_FIRST_DOSE=2022-10-03`) |
+| 5 | `local/reports/bq2_ibm_report.py` | laptop: `results/bq2/bq2_ibm_report.txt` + `app/data/bq2_ibm_data.json` (HI-Large tab, "New-tactic test") |
+
+Window: Weeks 5-13 (29 Aug - 30 Oct 2022), baseline Weeks 5-6 (as in Joey's HI-Large Part 1). Limits: the hidden
+payments still exist in the raw data before Week 10 (removed from grading and Part 1 only), and with the 4-week
+label lag the retrained model would go live after the last scored day, so the BQ1 model line stands in for it.
+
 ## Assumptions to state
 
 - SAML-D has no bank IDs, owners or second amount: bank = country, every account its own owner, amount received from fixed exchange rates, payment types mapped onto IBM's 7 formats. Owner features are constant on SAML-D, so the model ignores them.

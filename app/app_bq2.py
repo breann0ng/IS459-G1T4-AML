@@ -195,8 +195,167 @@ def ibm_tab():
         st.caption("No tactic change, so no alert and no retraining: the BQ1 model keeps its test performance.")
 
 
+@st.cache_data
+def load_ibm():
+    p = DATA / "bq2_ibm_data.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def ibm_test_section():
+    """HI-Large: Joey's Part 1 + Part 2 on our data, and the fan-in / fan-out new-tactic test
+    (data/bq2_ibm_data.json, written by local/reports/bq2_ibm_report.py after run_bq2_ibm.sh)."""
+    J = load_ibm()
+    if not J:
+        return
+    st.divider()
+    st.subheader("New-tactic test · what if fan-in and fan-out were brand new?")
+    st.caption("HI-Large's tactics do not change, so we built a test: fan-in and fan-out laundering are left out of "
+               "every week before the day they 'appear'. The bank's model then is the BQ1 model trained without "
+               "them (it has never seen them); the BQ1 model that knows them shows what retraining would give. "
+               "Same Part 1 and Part 2 rules as the SAML-D tab; cases are confirmed 4 weeks late.")
+    scen = st.radio("View", ["new_tactic", "real"], horizontal=True, key="ibm_scen",
+                    format_func=lambda s: {"new_tactic": "New-tactic test (fan-in + fan-out appear)",
+                                           "real": "Real data (nothing hidden)"}[s])
+    p1, p2 = J["part1"].get(scen, {}), J["part2"].get(scen, {})
+    wk1, sh1, sm1 = (pd.DataFrame(p1.get(k, [])) for k in ("weekly", "shares", "summary"))
+    if wk1.empty:
+        st.info("No Part 1 results for this view yet.")
+        return
+    start = pd.to_datetime(wk1["week_start"]).min()
+    wno = lambda s: int((pd.Timestamp(s) - start).days // 7 + 1)
+    wk1["week"] = [wno(w) for w in wk1["week_start"]]
+    lw = wk1[wk1["population"] == "laundering"]
+    b0, b1 = int(lw[lw["in_baseline"]]["week"].min()), int(lw[lw["in_baseline"]]["week"].max())
+    m0, m1 = (J["meta"].get(scen, {}).get(v, {}) for v in ("v0", "v1"))
+    dec = J["decision"].get(scen, {})
+    excl = (m0.get("excluded_patterns") or []) if scen == "new_tactic" else []
+    hid = " + ".join(x.replace("_", "-") for x in excl) or "fan-in + fan-out"
+    w2 = pd.DataFrame(p2.get("weekly", []))
+    if len(w2):
+        w2["week"] = [wno(w) for w in w2["week_start"]]
+    intro = None
+    if scen == "new_tactic":
+        em = w2[(w2["group"] == "emerging") & (w2["cases"] > 0)] if len(w2) else w2
+        intro = int(em["week"].min()) if len(em) else None
+
+    # ---- headline cards
+    tc = lw[lw["tactic_change"] & (lw["week"] > b1)]
+    first_tc = int(tc["week"].min()) if len(tc) else None
+    tc_dims = ", ".join(sorted(set(tc[tc["week"] == first_tc]["dimension"]))) if first_tc else ""
+
+    def tot(v, g, frm=None):
+        a = w2[(w2["version"] == v) & (w2["group"] == g)] if len(w2) else w2
+        a = a[a["week"] >= frm] if (frm and len(a)) else a
+        return a["caught"].sum() / a["cases"].sum() if len(a) and a["cases"].sum() else float("nan")
+
+    if scen == "new_tactic" and intro:
+        impact = f"{tot('v0', 'emerging', intro):.0%} vs {tot('v1', 'emerging', intro):.0%}"
+        impact_sub = (f"{hid} caught from Week {intro}: model that never saw them vs BQ1 model "
+                      f"(validation recall {m0.get('validation', {}).get('recall', float('nan')):.0%})")
+    else:
+        impact = f"{tot('v0', 'all'):.0%}"
+        impact_sub = (f"laundering payments caught each week by the BQ1 model (validation "
+                      f"{m0.get('validation', {}).get('recall', float('nan')):.0%})") if m0 else ""
+    a_wk = wno(dec["alert_week"]) if dec.get("alert") else None
+    cards([("Tactic change detected? (Part 1)", f"Week {first_tc}" if first_tc else "No",
+            (f"{tc_dims} · {'appeared Week ' + str(intro) if intro else ''}" if first_tc
+             else "no lasting change after the baseline"), ORANGE if first_tc else GREY),
+           ("Detection alert? (Part 2 rules)", f"Week {a_wk}" if a_wk else "No",
+            ("; ".join(dec.get("rules", [])) + f" · known {dec.get('known_on', '')} (cases confirmed 4 weeks late)")
+            if a_wk else "no rule held 2 weeks in a row: no retraining needed", ORANGE if a_wk else GREY),
+           ("Detection impact", impact, impact_sub, None)])
+
+    # ---- stacked laundering mix by pattern (Part 1 shares)
+    st.markdown("**How laundering breaks down each week** (confirmed cases, by pattern)")
+    mix = pd.DataFrame(sh1)
+    if len(mix):
+        mix = mix[(mix["population"] == "laundering") & (mix["dimension"] == "pattern")].copy()
+        mix["week"] = [wno(w) for w in mix["week_start"]]
+        mix["Week"] = [f"W{w} · {pd.Timestamp(s):%d %b}" for w, s in zip(mix["week"], mix["week_start"])]
+        order = list(mix.sort_values("week")["Week"].unique())
+        mix["pattern"] = mix["category"].str.replace("_", "-")
+        ch = alt.Chart(mix).mark_bar().encode(
+            x=alt.X("Week:N", sort=order, title=None, axis=alt.Axis(labelAngle=-45)),
+            y=alt.Y("share:Q", stack="normalize", axis=alt.Axis(format="%"), title="Share of laundering payments"),
+            color=alt.Color("pattern:N", title="pattern"),
+            tooltip=["Week", "pattern", alt.Tooltip("share:Q", format=".1%"), "n"])
+        layers = [ch]
+        if intro:
+            r = pd.DataFrame({"Week": [o for o in order if o.startswith(f"W{intro} ")][:1], "t": ["new tactic"]})
+            if len(r):
+                layers += [alt.Chart(r).mark_rule(color=ORANGE, strokeDash=[4, 3], strokeWidth=2).encode(
+                               x=alt.X("Week:N", sort=order)),
+                           alt.Chart(r).mark_text(color=ORANGE, align="left", dx=4, dy=-6, fontWeight="bold").encode(
+                               x=alt.X("Week:N", sort=order), y=alt.value(8), text="t:N")]
+        st.altair_chart(alt.layer(*layers).properties(height=340), width="stretch")
+        st.caption(f"Weeks 1–{b0 - 1}: simulator warm-up · Weeks {b0}–{b1}: baseline. "
+                   + (f"The {hid} slices appear from Week {intro}." if intro else "The mix stays the same week to week."))
+
+    # ---- JS per measure (Part 1)
+    dim = st.selectbox("Change vs baseline, by measure", ["pattern", "format", "amount", "cross_bank", "cross_ccy", "hour"],
+                       key="ibm_dim", format_func=lambda x: {"pattern": "typology mix", "format": "payment format",
+                                                             "amount": "amount", "cross_bank": "cross-bank",
+                                                             "cross_ccy": "cross-currency", "hour": "hour of day"}[x])
+    g = wk1[wk1["dimension"] == dim].sort_values("week")
+    lines = pd.concat([g[g["population"] == "laundering"].assign(series="laundering"),
+                       g[g["population"] == "honest"].assign(series="honest payments (control)")])
+    thr = float(g[g["population"] == "laundering"]["js_threshold"].iloc[0]) if len(g) else 0.1
+    conf = g[(g["population"] == "laundering") & g["tactic_change"]][["week", "js"]]
+    st.altair_chart(change_chart(lines[["week", "js", "series"]], thr,
+                                 bands=[(1, b0, "warm-up"), (b0, b1 + 1, "baseline")],
+                                 rules=[(intro, "new tactic appears")] if intro else (), confirmed=conf,
+                                 ymax=max(0.3, float(lines["js"].max()) * 1.15)), width="stretch")
+    st.caption("A week counts as a tactic change when laundering moves above the threshold (bigger than any normal "
+               "baseline week), the chi-square test says it is real, it lasts 2 weeks, and honest payments did not "
+               "move too (so it is not the calendar, e.g. month-end). Dots = confirmed tactic change.")
+
+    # ---- Part 2: recall per week
+    if len(w2):
+        st.markdown("**Is detection affected?** Share of laundering payments caught each week")
+        names = ({"v0": "model that never saw " + hid, "v1": "BQ1 model (knows them)"} if scen == "new_tactic"
+                 else {"v0": "BQ1 model"})
+        grp = {"all": "all laundering", "emerging": hid, "established": "other patterns"}
+        r = w2[w2["version"].isin(names) & w2["group"].isin(grp)].dropna(subset=["recall"]).copy()
+        r["model"], r["laundering"] = r["version"].map(names), r["group"].map(grp)
+        x = alt.X("week:Q", title="Week", axis=alt.Axis(tickMinStep=1, format="d"))
+        ch = alt.Chart(r).mark_line(point=True).encode(
+            x=x, y=alt.Y("recall:Q", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1]), title="Caught"),
+            color=alt.Color("model:N", scale=alt.Scale(range=[ORANGE, BLUE]), legend=alt.Legend(orient="top", title=None)),
+            strokeDash=alt.StrokeDash("laundering:N", legend=alt.Legend(orient="top", title=None)),
+            tooltip=["model", "laundering", "week", alt.Tooltip("recall:Q", format=".1%"), "cases", "caught"])
+        layers = [ch]
+        if m0.get("validation", {}).get("recall") is not None:
+            v = m0["validation"]["recall"] - C_RECALL_DROP
+            layers.append(alt.Chart(pd.DataFrame({"y": [v]})).mark_rule(color=GREY, strokeDash=[6, 4]).encode(y="y:Q"))
+        if intro:
+            layers.append(alt.Chart(pd.DataFrame({"week": [intro]})).mark_rule(color=ORANGE, strokeDash=[2, 3]).encode(x="week:Q"))
+        st.altair_chart(alt.layer(*layers).properties(height=320), width="stretch")
+        st.caption(f"Grey dashed line = rule R1: the model's validation recall minus {C_RECALL_DROP:.0%}. "
+                   "R2 = a never-seen typology caught under 50% (at least 20 cases); R3 = a known typology 20 points "
+                   "below its validation recall. A rule must hold 2 weeks in a row to raise the alert.")
+        rw = pd.DataFrame(p2.get("rules", []))
+        if len(rw):
+            rw["Week"] = [wno(w) for w in rw["week_start"]]
+            show = rw[["Week", "cases", "recall", "r1_recall_drop", "r2_new_typology", "r3_typology_drop", "alert"]].rename(
+                columns={"cases": "laundering payments", "r1_recall_drop": "R1 recall drop",
+                         "r2_new_typology": "R2 new typology", "r3_typology_drop": "R3 typology drop"})
+            show["recall"] = show["recall"].map(lambda v: f"{v:.0%}" if v == v else "")
+            with st.expander("Rule checks week by week (the bank's model)"):
+                st.dataframe(show, hide_index=True, width="stretch")
+        if dec.get("alert"):
+            st.warning(f"Alert in Week {a_wk}: {'; '.join(dec.get('rules', []))}. The bank knows on {dec['known_on']} "
+                       f"(cases confirmed 4 weeks late), retrains with cases up to {dec['retrain_to']} and deploys on "
+                       f"{dec['deploy_from']}" + (" (after the last scored day; the BQ1 model line shows what the "
+                                                  "retrained model catches)." if scen == "new_tactic" else "."))
+        else:
+            st.success("No rule held two weeks in a row: no alert, no retraining needed.")
+
+
+C_RECALL_DROP = 0.10          # bq2_common.RECALL_DROP (rule R1); kept here so the app needs no aws/ code
+
 with tab_ibm:
     ibm_tab()
+    ibm_test_section()
 
 # ================================================================== SAML-D
 with tab_saml:
