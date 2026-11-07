@@ -59,6 +59,22 @@ def hours(h):
     return f"{h:.0f} h" if h < 48 else f"{h / 24:.1f} days"
 
 
+def chart(c, **kw):
+    """Every chart with larger axis and legend text (the site default is hard to read)."""
+    st.altair_chart(c.configure_axis(labelFontSize=17, titleFontSize=18, titlePadding=12)
+                     .configure_legend(labelFontSize=17, titleFontSize=17, symbolSize=200, labelLimit=0)
+                     .configure_header(labelFontSize=17), **kw)
+
+
+def takeaway(text, why, read=None):
+    """Under every chart: the finding in one or two lines, then ONE folded box: how to read it, then why it matters."""
+    st.info(f"**Takeaway:** {text}", icon=":material/lightbulb:")
+    with st.expander("How to read this, and why it matters"):
+        if read:
+            st.markdown(f"**How to read it.** {read}")
+        st.markdown("\n".join(f"- {w}" for w in why))
+
+
 def nice(p):
     return "Layering (stack + bipartite)" if p == "layering" else p.replace("_", " ").capitalize()
 
@@ -79,24 +95,16 @@ top2 = pd.DataFrame(d.get("top2") or [])
 
 # ------------------------------------------------------------------ header
 st.title("BQ1 · Early detection")
-st.markdown("<div style='font-size:1.6rem;line-height:1.35;font-weight:600;margin:.1rem 0 .5rem'>How can we "
+st.markdown("<div style='font-size:1.35rem;line-height:1.4;font-weight:600;margin:.1rem 0 .5rem'>How can we "
             "automatically detect laundering patterns early, while keeping false alerts low enough for analysts "
             "to manage?</div>", unsafe_allow_html=True)
-st.caption(f"Tested once on {days} "
-           f"unseen days of HI-Large ({frozen['date_from'][:10]} to {frozen['date_to'][:10]}, "
-           f"{frozen['payments'] / 1e6:.1f}M payments), trained on HI-Small and HI-Medium only.")
-
-
-tab1, tab2, tab3, tab4 = st.tabs([":material/notifications: Alerts & accuracy", ":material/timer: Speed", ":material/groups: Who checks what", ":material/search: The alert"])
+tab1, tab2, tab3, tab4 = st.tabs([":material/notifications: Alerts & accuracy", ":material/timer: Speed",
+                                  ":material/groups: Who checks what", ":material/inventory_2: Archived findings"])
 
 with tab1:
     # ------------------------------------------------------------------ 1. alerts and accuracy
     st.subheader(f"{pct(frozen['precision'])} of alerts are real, but they reach only {pct(frozen['recall'])} of laundering")
-    st.caption("How many alerts a day, and what they catch")
-    with st.expander("How to read this"):
-        st.caption("Each day the model gives every account a risk score, and the riskiest accounts become alerts. "
-        "One alert is one account on one day.")
-    st.caption(f"**How to use:** drag the slider to the number of alerts your team can review a day. The four numbers and "
+    st.markdown(f":material/touch_app: **How to use:** drag the slider to the number of alerts your team can review a day. The four numbers and "
             f"the chart follow it. It starts at the model's own setting ({thr_k:,} a day), which sections 2 to 4 use.")
 
     opts = ad[ad["cutoff"].str.startswith("top") | (ad["cutoff"] == "frozen_threshold")].copy()
@@ -131,23 +139,50 @@ with tab1:
                       scale=alt.Scale(domain=[0, 1])),
         tooltip=[alt.Tooltip("k:O", title="Alerts/day", format=","), alt.Tooltip("precision:Q", format=".1%")])
     prule = alt.Chart(pd.DataFrame({"k": [pick]})).mark_rule(color=INK, strokeDash=[4, 4]).encode(x=xp)
-    st.altair_chart((pline + prule).properties(height=260),
+    chart((pline + prule).properties(height=260),
                     width="stretch")
-    with st.expander("How to read this"):
-        st.caption(f"Up to about 1,000 alerts a day almost every alert is real; past 2,000 the extra alerts are mostly false. "
-        f"About {n_pos / days:,.0f} accounts launder money on an average test day, so {pick:,} alerts a day can "
-        f"find at most {pick:,} of them: reviewing {pick:,} finds {per_day(n_true / days)}.")
+    pk = pc.set_index("k")["precision"]
+    real = lambda k: k * pk[k]                                    # real alerts a day at k alerts a day
+    if {1000, 5000, thr_k} <= set(pk.index) and 5000 > thr_k:
+        extra = (real(5000) - real(thr_k)) / (5000 - thr_k)
+        false5k = 5000 * (1 - pk[5000])
+        missed = 1 - frozen["recall"]
+        takeaway(f"up to about 2,000 alerts a day, the team's capacity, not the model, limits how much laundering is "
+                 f"caught: almost every extra alert there is real. Past the model's setting the model has run out of "
+                 f"laundering it can recognise: each extra 100 alerts find only about {extra * 100:.0f} launderers. So "
+                 f"the {pct(missed)} of laundering still missed will not be found by hiring more analysts; it needs new "
+                 "signals in the model.",
+                 [f"**Which half of BQ1 this answers.** BQ1 asks for early detection *and* false alerts low enough for "
+                  f"analysts to manage. This chart is the second half: it maps the number of alerts a team can review a "
+                  f"day to how many of them are worth their time.",
+                  f"**What the shape tells us.** The line stays near 100% up to 1,000 alerts a day, falls slowly to "
+                  f"{pct(pk[thr_k])} at the model's setting ({thr_k:,}), then drops to {pct(pk[5000])} at 5,000. A flat "
+                  "start means the model ranks well: its most suspicious accounts really are laundering. The sharp drop "
+                  "means it has used up the laundering it can tell apart from normal activity, not that it ranks badly.",
+                  f"**Why the drop happens where it does.** About 60% of laundering follows a known pattern, and the model "
+                  "finds about 85% of that. Once those cases are in the queue, what is left looks like ordinary payments, "
+                  "so extra alerts are mostly ordinary customers.",
+                  f"**The decision it supports.** The Tuning Team should set the daily alert budget near the model's "
+                  f"setting. Going to 5,000 a day would add about {false5k:,.0f} false alerts a day for a small gain. "
+                  "Money is better spent on new model signals (for example links to accounts already confirmed as "
+                  "laundering) than on more analysts.",
+                  "**Limits.** Synthetic data; one alert = one account on one day; the threshold was fixed on "
+                  "validation days before this test."], read=(
+                 "Each day the model gives every account a risk score; the riskiest accounts become alerts, and one "
+                 "alert is one account on one day. The line shows, for each daily alert volume on the bottom axis, the "
+                 "share of alerts that are real laundering (precision); the dashed line is the volume on the slider. "
+                 "Precision = real alerts / all alerts; recall = laundering that got an alert / all laundering. Every "
+                 f"number comes from one test on {days} unseen days of HI-Large ({frozen['date_from'][:10]} to "
+                 f"{frozen['date_to'][:10]}, {frozen['payments'] / 1e6:.1f}M payments); the threshold was fixed on "
+                 "HI-Small and HI-Medium validation days and never tuned on HI-Large. The data is IBM's synthetic AML "
+                 "data, so real banks' volumes and patterns will differ."))
 
 
 with tab2:
     # ------------------------------------------------------------------ 2. speed
     _eod = sc["caught_before_end_eod"].fillna(False).astype(bool).mean() if not sc.empty else tot["alert_before_end_eod"]
     st.subheader(f"{pct(_eod)} of schemes are alerted while they are still running")
-    st.caption("How fast schemes are caught, compared with how long they last")
-    with st.expander("How to read this"):
-        st.caption("A scheme is one laundering operation in the dataset's answer key (Patterns.txt): a set of payments with a "
-        "first and a last payment time. Only schemes that started in the test days are counted.")
-    st.caption("**How to use:** pick a pattern (or all), then choose when a scheme counts as detected: when the end-of-day "
+    st.markdown(":material/touch_app: **How to use:** pick a pattern (or all), then choose when a scheme counts as detected: when the end-of-day "
             "alert reaches analysts (today's process) or when its first payment is flagged (if payments were scored as "
             "they happen). The numbers on the left and the chart both follow your choice.")
 
@@ -202,14 +237,31 @@ with tab2:
                 color=alt.Color("line:N", scale=alt.Scale(domain=[over_lbl, found_lbl], range=[GREY, ORANGE]),
                                 legend=alt.Legend(title=None, orient="bottom", labelLimit=0)),
                 tooltip=[alt.Tooltip("h:Q", title="Hours"), "line:N", alt.Tooltip("share:Q", format=".0%")])
-            st.altair_chart(cl.properties(height=320), width="stretch")
+            chart(cl.properties(height=320), width="stretch")
             at24 = lambda s: pct((s <= 24).mean())
-            with st.expander("How to read this"):
-                st.caption(f"How to read it: pick an hour on the bottom axis. At 24 hours, {at24(dur)} of these schemes have "
-                f"made their last payment (grey) and {at24(pd.Series(det_inf))} have been detected (orange). "
-                f"Grey starts at {pct((dur <= 0).mean())} because that many schemes make all their payments within "
-                "the same minute, so they are over before any alert exists. The two lines compare the whole group; "
-                "the per-scheme answer is 'Detected while still running' on the left.")
+
+        d24, o24 = (pd.Series(det_inf) <= 24).mean(), (dur <= 24).mean()
+        takeaway(f"the model is not the slow part; the daily schedule is. {pct(d24)} of these schemes are detected "
+                 f"within a day of starting, yet {pct(o24)} have already made their last payment by then. Faster "
+                 "alerts would therefore save more laundering than a better model would.",
+                 ["**Which half of BQ1 this answers.** The 'early' half. Early only means something next to how long "
+                  "schemes last, so detection (orange) is drawn against how fast schemes finish (grey).",
+                  f"**What the shape tells us.** Orange climbs steeply in the first day because alerts arrive at the end "
+                  f"of the day a scheme starts. Grey starts at {pct((dur <= 0).mean())}: that many schemes make every "
+                  "payment in the same minute and are over before any alert can exist. Where orange is above grey, "
+                  "detection is ahead of the schemes; where it is below, schemes are finishing before anyone is told.",
+                  f"**What follows.** The median detection ({hours(det[found].median())}) is close to the median scheme "
+                  f"length ({hours(dur.median())}), so about half the schemes end before analysts can act. Because the "
+                  "model already flags most schemes on their first payment, the lost time is the wait for the day to "
+                  "close, not the model.",
+                  "**The decision it supports.** Scoring payments as they arrive (live) is an architecture change, not a "
+                  "model change, and it is the lever for speed. The charts below show which patterns and which scheme "
+                  "lengths would gain from it."], read=(
+                 "A scheme is one laundering operation in the dataset's answer key (Patterns.txt), from its first to its "
+                 "last payment; only schemes that started in the test days count. Pick an hour on the bottom axis: grey "
+                 "is the share of schemes already over, orange the share already detected. The end-of-day clock assumes "
+                 "alerts reach analysts at midnight after the day closes; the live clock is a best case, because each "
+                 "score uses that whole day's payments."))
 
         # ---------------------------------------------------------- 2a. per pattern: length vs time to detection
         det_col = "hours_to_first_flag" if live else "hours_to_alert"
@@ -230,7 +282,7 @@ with tab2:
                                                    range=[GREY, ORANGE]), legend=alt.Legend(title=None, orient="top")),
             tooltip=[alt.Tooltip("pattern:N", title="Pattern"), "m:N", alt.Tooltip("hours:Q", format=".1f"),
                      alt.Tooltip("schemes:Q", format=",")])
-        st.altair_chart((link_a + dots_a).properties(height=alt.Step(34)), width="stretch")
+        chart((link_a + dots_a).properties(height=alt.Step(34)), width="stretch")
         inst_p = pm[pm["length_h"] <= 0]["pattern"].tolist()
         late = pm[(pm["length_h"] > 0) & (pm["detect_h"] > pm["length_h"])].sort_values("length_h")["pattern"].tolist()
         on_time = pm[(pm["length_h"] > 0) & (pm["detect_h"] <= pm["length_h"])].sort_values(
@@ -244,15 +296,28 @@ with tab2:
             parts.append(f"the typical {low(late)} scheme is over before {clock_word} (orange right of grey)")
         if on_time:
             parts.append(f"{low(on_time)} schemes run long enough to be caught in time")
-        st.info(f"**Takeaway:** with {clock_word}, " + "; ".join(parts) + ".", icon=":material/lightbulb:")
-        with st.expander("How this answers BQ1, and why it matters"):
-            st.markdown(
-                "- BQ1 asks whether we detect laundering **early**. Early only means something next to how long a scheme "
-                "lasts: 13 hours is fast for a scheme that runs for days, and too late for one that ends in an hour.\n"
-                "- The gap between the two dots is the time an analyst has to act (orange left of grey) or the time the "
-                "scheme had already finished (orange right of grey).\n"
-                "- Use: patterns with orange right of grey need a faster process (live scoring) or manual monitoring of "
-                "the accounts involved; the others can rely on the daily alert.")
+        takeaway(("speed is a pattern problem, not a model problem. "
+                  + (f"{low(inst_p).capitalize()} schemes happen in one burst, so for them the realistic goal is fast "
+                     "follow-up after the fact, not prevention. " if inst_p else "")
+                  + (f"{low(late).capitalize()} schemes end a few hours before {clock_word}: these are where a faster "
+                     "alert would turn late detection into prevention. " if late else "")
+                  + (f"{low(on_time).capitalize()} schemes run for a day or more, so the current alert already leaves "
+                     "time to act on them." if on_time else "")),
+                 ["**Which half of BQ1 this answers.** The 'early' half, pattern by pattern. A single average speed hides "
+                  "that 13 hours is fast for a scheme that runs for days and far too late for one that ends in an hour.",
+                  "**What the shape tells us.** Detection (orange) sits in a narrow band for every pattern, because the "
+                  "model flags most schemes on their first payment and alerts come at the end of that day. Scheme "
+                  "length (grey) varies hugely between patterns. So whether a pattern is caught in time depends almost "
+                  "entirely on how long that kind of scheme runs, not on how hard it is to spot.",
+                  "**What follows.** Patterns split into three groups that need different treatment: one-burst "
+                  "patterns (detect afterwards and freeze funds fast), patterns that end within a day (live scoring or "
+                  "watching the accounts would turn late into on time) and long-running patterns (today's daily alert "
+                  "is enough).",
+                  "**The decision it supports.** The Tuning Team can target speed work at the middle group instead of "
+                  "the whole system, and give analysts a rule of thumb per pattern."], read=(
+                 "Each row is a pattern. Grey dot: how long its schemes usually last (median, first to last payment). "
+                 "Orange dot: how long until they are usually detected (median, with the clock chosen above). Orange "
+                 "to the right of grey means the typical scheme is over before it is detected."))
 
         # ---------------------------------------------------------- 2b. caught within the scheme's own period
         st.divider()
@@ -278,77 +343,37 @@ with tab2:
             order=alt.Order("outcome_rank:Q"),
             tooltip=[alt.Tooltip("pattern:N", title="Pattern"), "outcome:N", alt.Tooltip("count():Q", title="Schemes")])
         oc["outcome_rank"] = oc["outcome"].map({"Caught while running": 0, "Caught after it ended": 1, "Not caught": 2})
-        st.altair_chart(bars_b.properties(height=alt.Step(30)), width="stretch")
+        chart(bars_b.properties(height=alt.Step(30)), width="stretch")
         all_run = (outcome(timed) == "Caught while running").mean() if len(timed) else None
         inst_found = instant[det_col].notna().mean() if len(instant) else None
-        st.caption(f"{len(timed):,} schemes that last longer than a minute. Another {len(instant):,} schemes "
+        st.markdown(f"{len(timed):,} schemes that last longer than a minute. Another {len(instant):,} schemes "
                    f"({pct(len(instant) / len(sc))}) make all their payments in the same minute: no alert can arrive while "
                    f"they run, and {pct(inst_found)} of them are detected afterwards.")
-        st.info(f"**Takeaway:** {pct(all_run)} of schemes that last longer than a minute are caught while still running "
-                f"with {clock_word}. Best: {oc_order[0].lower()} ({pct(share.max())}); worst: {oc_order[-1].lower()} "
-                f"({pct(share.min())}).", icon=":material/lightbulb:")
-        with st.expander("How this answers BQ1, and why it matters"):
-            st.markdown(
-                "- Each scheme's own window comes from the answer key (Patterns.txt): its first to its last payment. "
-                "Blue means the alert arrived inside that window, while there was still money left to stop.\n"
-                "- Orange schemes were still found, but only after the last payment: useful for investigation and "
-                "reporting, too late to prevent the loss.\n"
-                "- Same-minute schemes are shown apart because no system can beat them in time; counting them in would "
-                "hide how the model does on schemes it could catch.\n"
-                "- Use: the patterns at the bottom are where analysts should watch accounts closely or where live "
-                "scoring would pay off most.")
+        gap = 1 - share.min()
+        takeaway(f"for schemes that can be stopped at all, the model is usually in time ({pct(all_run)} caught while "
+                 f"running), so the remaining risk is concentrated, not spread out: {oc_order[-1].lower()} loses "
+                 f"{pct(gap)} of its schemes to late or missed alerts, against {pct(1 - share.max())} for "
+                 f"{oc_order[0].lower()}. Extra effort pays most on the patterns at the bottom of this chart.",
+                 ["**Which half of BQ1 this answers.** 'Early' in the strictest sense: did the alert arrive while the "
+                  "scheme was still moving money, using each scheme's own first and last payment from the answer key "
+                  "(Patterns.txt)?",
+                  "**What the shape tells us.** Blue (caught while running) dominates every pattern, so the model is not "
+                  "systematically late. Orange (caught after it ended) is what grows where the model falls short; grey "
+                  "(not caught) is small everywhere, so missing schemes entirely is rare.",
+                  f"**What follows.** Prevention is realistic for most schemes. The {len(instant):,} same-minute schemes "
+                  f"are left out because no system can beat them in time ({pct(inst_found)} are still found afterwards); "
+                  "counting them would make the model look worse for a reason no setting can fix.",
+                  "**The decision it supports.** Put analysts' close watching, or the first live-scoring pilot, on the "
+                  "patterns at the bottom: that is where an earlier alert changes the outcome."], read=(
+                 "Each bar is one pattern's schemes that last longer than a minute: blue = caught while still running, "
+                 "orange = caught after its last payment, grey = never caught. Schemes that make every payment in the "
+                 "same minute are counted separately in the line above the takeaway."))
 
-        # ---------------------------------------------------------- 2c. the window period
-        st.divider()
-        st.markdown("#### :material/hourglass_bottom: The window: how long must a scheme run to be caught in time?")
-        lab = ["Same minute", "Under 6 h", "6 to 24 h", "1 to 3 days", "Over 3 days"]
-        cut = pd.cut(sub["duration_h"].astype(float), [-0.01, 0, 6, 24, 72, 1e9], labels=lab)
-        fe, fl = sub["hours_to_alert"].astype(float), sub["hours_to_first_flag"].astype(float)
-        run_eod = fe.notna() & sub["caught_before_end_eod"].fillna(False).astype(bool)
-        run_live = fl.notna() & (fl < sub["duration_h"].astype(float))
-        win = pd.concat([
-            pd.DataFrame({"length": cut, "clock": "End-of-day alert (today)", "ok": run_eod}),
-            pd.DataFrame({"length": cut, "clock": "First flagged payment (live)", "ok": run_live})])
-        win = win.groupby(["length", "clock"], observed=True).agg(share=("ok", "mean"), schemes=("ok", "size")).reset_index()
-        xw = alt.X("length:N", sort=lab, title="How long the scheme runs (first to last payment)", axis=alt.Axis(labelAngle=0))
-        lines_c = alt.Chart(win).encode(
-            x=xw, y=alt.Y("share:Q", title="Caught while still running", axis=alt.Axis(format="%"),
-                          scale=alt.Scale(domain=[0, 1])),
-            color=alt.Color("clock:N", scale=alt.Scale(domain=["End-of-day alert (today)", "First flagged payment (live)"],
-                                                       range=[ORANGE, BLUE]), legend=alt.Legend(title=None, orient="top")),
-            tooltip=["length:N", "clock:N", alt.Tooltip("share:Q", format=".0%"), alt.Tooltip("schemes:Q", format=",")])
-        st.altair_chart((lines_c.mark_line(strokeWidth=2.5) + lines_c.mark_point(filled=True, size=80))
-                        .properties(height=300), width="stretch")
-        eodw = win[win["clock"].str.startswith("End")].set_index("length")["share"]
-        first_ok = next((b for b in lab if eodw.get(b, 0) >= 0.8), None)
-        st.info(f"**Takeaway:** the daily alert catches a scheme in time only if it runs for about "
-                f"{'a day or more' if first_ok in ('1 to 3 days', 'Over 3 days') else 'the ' + str(first_ok).lower()}: "
-                f"{pct(eodw.get('6 to 24 h'))} of 6 to 24 hour schemes, {pct(eodw.get('1 to 3 days'))} of 1 to 3 day "
-                "schemes. Scoring payments as they happen would close most of that gap for schemes shorter than a day.",
-                icon=":material/lightbulb:")
-        with st.expander("How this answers BQ1, and why it matters"):
-            st.markdown(
-                "- This is the window period: the minimum time a scheme has to keep moving money for today's daily "
-                "alert to reach analysts before it ends.\n"
-                "- The orange line (end of day) jumps between 'under a day' and 'over a day' because alerts are only "
-                "made when the day closes. The blue line shows the same model scored live: the gap between the lines is "
-                "what live scoring would add.\n"
-                "- Use: it turns 'how early is early?' into a number the Tuning Team can act on, and it gives the cost "
-                "case for live scoring (an architecture change, not a model change).\n"
-                "- Follows the Pattern filter above.")
 
 
 with tab3:
     # ------------------------------------------------------------------ 3. which patterns need people
     st.subheader("Which patterns the model can handle, and which need analysts")
-    with st.expander("How to read this"):
-        st.caption("Each pattern gets a colour from three numbers, with cut-offs fixed on the validation data (HI-Small and "
-        "HI-Medium) before testing. Laundering caught: green from 88%, red below 78%. Alerts that are real: green "
-        "from 90%, red below 80%. Caught before it ends: green from 50%, red below 40%. A pattern takes the colour of "
-        "its worst number.")
-    st.caption("**How to use:** read the Status column first. Red patterns need analysts checking by hand, yellow ones a "
-            "spot-check of a sample, green ones can be left to the model. 'Why' names the number that set the colour. "
-            "Hover a column header's (?) for how that column is calculated.")
     th = CUTOFFS
 
     pats = pd.DataFrame(d["patterns"])
@@ -405,14 +430,15 @@ with tab3:
 
     cell_key = {"Laundering caught": "recall", "Alerts that are real": "precision", "Caught before it ends": "speed"}
     css = pd.DataFrame("", index=tbl.index, columns=tbl.columns)       # colours from the numbers...
-    css["Status"] = [f"background-color: {RAG[v]}; font-weight: 600" for v in tbl["Status"]]
+    css["Pattern"] = [f"background-color: {RAG[v]}; font-weight: 600" for v in tbl["Status"]]   # overall colour
     for c, k in cell_key.items():
         css[c] = [f"background-color: {RAG[rate(v, th[k])]}" if rate(v, th[k]) else "" for v in tbl[c]]
     show = tbl.copy()                                                   # ...shown as text (Streamlit prints blanks as "None")
     for c in [c for c in tbl.columns if c in cell_key or c.startswith("Named right")]:
         show[c] = tbl[c].map(pct)
     col_help = {
-        "Status": "The colour of the pattern's worst number (see the cut-offs above).",
+        "Pattern": "Coloured by the pattern's worst number: red = analysts check by hand, yellow = spot-check, "
+                   "green = let the model handle it.",
         "Why": "Which numbers set the colour.",
         "Laundering caught": "Of this pattern's laundering account-days in the answer key, the share that got an alert "
                              "(recall for this pattern).",
@@ -428,23 +454,43 @@ with tab3:
         "Named right (2 guesses)": "Same, counting the alert as right when the true pattern is either of the model's two "
                                    "guesses.",
     }
+    show, css = show.drop(columns="Status"), css.drop(columns="Status")
     st.dataframe(show.style.apply(lambda _: css, axis=None), hide_index=True, width="stretch",
                  column_config={c: st.column_config.Column(help=h) for c, h in col_help.items() if c in show.columns})
 
-    red = tbl.loc[tbl["Status"] == "Red", "Pattern"].tolist()
-    late = tbl.loc[[rate(v, th["speed"]) != "Green" and pd.notna(v) for v in tbl["Caught before it ends"]], "Pattern"].tolist()
-    st.caption(f"{len(red)} of {len(tbl)} patterns are red ({', '.join(red) or 'none'}). "
-               f"Caught late ({', '.join(p.lower() for p in late)}): these schemes are mostly over within hours, so a daily "
-               "alert arrives after they end, and they need live scoring or analysts watching the accounts. "
-               "Unclassified laundering follows no known shape and is almost never caught.")
-
+    by = lambda s: tbl.loc[tbl["Status"] == s, "Pattern"].tolist()
+    red, yellow, green = by("Red"), by("Yellow"), by("Green")
+    not_green = tbl[tbl["Status"] != "Green"]
+    n_late = not_green["Why"].str.contains("caught late").sum()
+    named = tbl[tbl["Pattern"] != "Unclassified"]
+    n_rec = sum(rate(v, th["recall"]) != "Green" for v in named["Laundering caught"] if pd.notna(v))
+    n_spd = sum(rate(v, th["speed"]) != "Green" for v in named["Caught before it ends"] if pd.notna(v))
+    n_prc = sum(rate(v, th["precision"]) != "Green" for v in named["Alerts that are real"] if pd.notna(v))
+    takeaway(f"analysts are needed to catch more and to catch sooner, not to filter noise. Alerts of every named "
+             f"pattern are 93% to 99% real ({n_prc} of {len(named)} below green), so no pattern needs people to sort "
+             f"true alerts from false ones. The shortfalls are in how much is caught ({n_rec} of {len(named)} named "
+             f"patterns under the 88% bar) and in timing ({n_spd} of {len(named)} finish before the daily alert), "
+             f"plus unclassified laundering the model cannot see. Red: {', '.join(red) or 'none'}.",
+             ["**Which half of BQ1 this answers.** Both, per pattern: is it caught (laundering caught), are its alerts "
+              "worth reviewing (alerts that are real) and is it caught in time (caught before it ends)?",
+              f"**What the colours tell us.** 'Alerts that are real' is green for the named patterns. The yellow sits "
+              f"in 'Laundering caught' ({n_rec} patterns, mostly a few points under 88%) and in 'Caught before it "
+              f"ends' ({n_spd} patterns, the fast ones). The weakness is coverage and timing, not trust in the alerts.",
+              "**What follows.** Analysts add the most value watching fast patterns live and investigating unclassified "
+              "activity, not double-checking alerts the model is already sure about. Green patterns can be handled with "
+              "light sampling.",
+              "**The decision it supports.** How to split analyst time across patterns. The cut-offs were fixed on the "
+              "validation days before testing, so a colour can't be tuned to look good."], read=(
+                 "Each number gets a colour, with cut-offs fixed on the validation days (HI-Small and HI-Medium) before "
+                 "testing. Laundering caught: green from 88%, red below 78%. Alerts that are real: green from 90%, red "
+                 "below 80%. Caught before it ends: green from 50%, red below 40%. The pattern name takes the colour of "
+                 "its worst number, and 'Why' names that number. Stack and bipartite are named together as layering, so "
+                 "they share a precision and naming score. Hover a column header's (?) for how it is calculated."))
 
 with tab4:
     # ------------------------------------------------------------------ 4. what the analyst sees
     st.subheader("Two guesses put the right pattern in front of the analyst far more often than one")
-    st.caption("Each alert comes with the pattern the model thinks it belongs to. One guess is often wrong, so the "
-               "analyst sees the two most likely patterns and checks those first instead of all eight.")
-    st.caption("**How to use:** the three numbers say how often the pattern name is right. The table below shows real "
+    st.markdown(":material/touch_app: **How to use:** the three numbers say how often the pattern name is right. The table below shows real "
             "alerts as an analyst would get them, next to the true pattern from the answer key, so you can see the "
             "guesses that go wrong.")
 
@@ -477,15 +523,29 @@ with tab4:
                             legend=alt.Legend(title=None, orient="top")),
             tooltip=[alt.Tooltip("name:N", title="Pattern"), "guess:N", alt.Tooltip("right:Q", format=".0%"),
                      alt.Tooltip("cases:Q", format=",", title="Alerts checked")])
-        st.altair_chart((link + dots).properties(height=alt.Step(34)), width="stretch")
-        st.caption("Validation days (HI-Small + HI-Medium), final namer. Cycle and random gain the most from a second "
-                   "guess: their first guess is usually wrong, but the right name is often second.")
-    with st.expander("How to read this"):
-        st.caption("Stage 1 decides how many alerts arrive; the pattern name decides how much work each alert is. The "
-                   "name tells the analyst where to look (a cycle: follow the money coming back; fan in: check the many "
-                   "senders). A wrong name never hides an alert: whether an account is alerted comes from the risk "
-                   "score alone.")
-
+        chart((link + dots).properties(height=alt.Step(34)), width="stretch")
+        tp["gain"] = tp["top2"] - tp["first"]
+        big, worst = tp.sort_values("gain").iloc[-1], tp.sort_values("top2").iloc[0]
+        weak = tp[tp["first"] < 0.5].sort_values("first")["name"].str.lower().tolist()
+        takeaway(f"a single pattern name is only a reliable starting point for long, structured schemes; for "
+                 f"{', '.join(weak) or 'some patterns'} the first guess is right less than half the time, so analysts "
+                 f"should treat it as a hint. A second guess turns the name into a short list that holds the right "
+                 f"answer {pct(tg['top2_macro'])} of the time, worst case {worst['name'].lower()} at {pct(worst['top2'])}.",
+                 ["**Which half of BQ1 this answers.** The 'manageable for analysts' half. Stage 1 sets how many alerts "
+                  "arrive; the pattern name sets how much work each one is, because it tells the analyst where to start "
+                  "(a cycle: follow the money coming back; fan in: check the many senders).",
+                  "**What the shape tells us.** Patterns with a clear shape over several days (layering, scatter "
+                  "gather) are named right first time; short or shapeless ones (cycle, random) are not, but their right "
+                  "name is usually the second guess. The gain from the second guess is largest exactly where the first "
+                  "guess is weakest.",
+                  "**What follows.** Showing two names costs one extra word per alert and removes most wrong starting "
+                  "points. It is the problem behind our proposal's MAS case: 8 of 9 fined banks had flagged transactions "
+                  "that nobody properly investigated.",
+                  "**Limits.** These are validation days; the HI-Large figure comes with the next full run. A wrong name "
+                  "never hides an alert: the risk score alone decides whether an account is alerted."], read=(
+                 "Each row is a pattern. Grey dot: how often the model's first guess is the right pattern; blue dot: "
+                 "how often the right pattern is one of its two guesses. Validation days (HI-Small and HI-Medium), "
+                 "final namer, truly laundering alerts of a known pattern."))
     ex = pd.DataFrame(d.get("alert_examples") or [])
     if not ex.empty:
         show = pd.DataFrame({
@@ -502,18 +562,65 @@ with tab4:
                 "First guess": [f"{nice(p)} ({c:.0%})" for p, c in zip(eg["predicted_pattern"], eg["pattern_confidence"])],
                 "Linked accounts": eg["g_accounts"], "Payments": eg["g_payments"],
                 "Actual (answer key)": eg["true_pattern"].map(nice)}), hide_index=True, width="stretch")
-            st.caption("Second guesses appear here after the full HI-Large run (final_group_namer.py now saves them).")
+    shown = ex if not ex.empty else pd.DataFrame(d.get("example_groups") or []).head(8)
+    if not shown.empty:
+        hit = (shown["predicted_pattern"] == shown["true_pattern"]).sum()
+        hit2 = ((shown["predicted_pattern"] == shown["true_pattern"])
+                | (shown["second_pattern"] == shown["true_pattern"])).sum() if "second_pattern" in shown else None
+        takeaway(f"wrong names cluster where cases are most complex. In these {len(shown)} alerts, among the "
+                 f"biggest linked groups, the first guess matches the answer key only {hit} times; across all HI-Large "
+                 "alerts it is right 56% of the time when two accounts are linked and 35% when more are. Big linked groups "
+                 "deserve a senior analyst, because the label is least trustworthy exactly where the case is hardest.",
+                 ["**Which half of BQ1 this answers.** 'Manageable': what an analyst actually works with, one row per "
+                  "alert with the model's guesses and how many accounts are linked to it.",
+                  "**What it tells us.** In big groups several schemes overlap, so one name cannot describe the whole "
+                  "group; the model falls back to the most common pattern (layering).",
+                  "**What follows.** Route alerts by group size: small groups to the general queue with the model's "
+                  "name, big groups to experienced analysts who map the network themselves.",
+                  "The answer key column is for this report only; analysts would not have it."], read=(
+                 "One row per alert as an analyst would get it: the day, the risk score, the model's guesses with their "
+                 "confidence and how many accounts are linked. The last column is the answer key, for this report only."))
 
-    with st.expander("How to read this, and its limits"):
-        st.markdown(
-            "- An **alert** is one account on one day. **Precision** = share of alerts that are real laundering; "
-            "**recall** = share of laundering that gets an alert.\n"
-            "- The threshold was fixed on HI-Small and HI-Medium validation days and never tuned on HI-Large.\n"
-            "- Schemes and patterns come from the dataset's answer key (`Patterns.txt`), used only to mark results, "
-            "never as model input.\n"
-            "- Speed assumes alerts are ready at midnight after the day closes. \"First high-risk payment\" shows how "
-            "early a live system could react, but each score uses that whole day's payments, so it is an upper bound.\n"
-            "- Stack and bipartite are named together as layering, so they share a precision and naming score.\n"
-            f"- Tested on {days} days of IBM's synthetic AML data; real banks' volumes and patterns will differ."
-        )
 
+
+with tab4:
+    # ---------------------------------------------------------- 2c. the window period
+    st.divider()
+    st.markdown("#### :material/hourglass_bottom: The window: how long must a scheme run to be caught in time?")
+    lab = ["Same minute", "Under 6 h", "6 to 24 h", "1 to 3 days", "Over 3 days"]
+    cut = pd.cut(sc["duration_h"].astype(float), [-0.01, 0, 6, 24, 72, 1e9], labels=lab)
+    fe, fl = sc["hours_to_alert"].astype(float), sc["hours_to_first_flag"].astype(float)
+    run_eod = fe.notna() & sc["caught_before_end_eod"].fillna(False).astype(bool)
+    run_live = fl.notna() & (fl < sc["duration_h"].astype(float))
+    win = pd.concat([
+        pd.DataFrame({"length": cut, "clock": "End-of-day alert (today)", "ok": run_eod}),
+        pd.DataFrame({"length": cut, "clock": "First flagged payment (live)", "ok": run_live})])
+    win = win.groupby(["length", "clock"], observed=True).agg(share=("ok", "mean"), schemes=("ok", "size")).reset_index()
+    xw = alt.X("length:N", sort=lab, title="How long the scheme runs (first to last payment)", axis=alt.Axis(labelAngle=0))
+    lines_c = alt.Chart(win).encode(
+        x=xw, y=alt.Y("share:Q", title="Caught while still running", axis=alt.Axis(format="%"),
+                      scale=alt.Scale(domain=[0, 1])),
+        color=alt.Color("clock:N", scale=alt.Scale(domain=["End-of-day alert (today)", "First flagged payment (live)"],
+                                                   range=[ORANGE, BLUE]), legend=alt.Legend(title=None, orient="top")),
+        tooltip=["length:N", "clock:N", alt.Tooltip("share:Q", format=".0%"), alt.Tooltip("schemes:Q", format=",")])
+    chart((lines_c.mark_line(strokeWidth=2.5) + lines_c.mark_point(filled=True, size=80))
+                    .properties(height=300), width="stretch")
+    eodw = win[win["clock"].str.startswith("End")].set_index("length")["share"]
+    first_ok = next((b for b in lab if eodw.get(b, 0) >= 0.8), None)
+    livew = win[win["clock"].str.endswith("(live)")].set_index("length")["share"]
+    takeaway(f"the daily alert creates a hard window of about one day: a scheme shorter than that is effectively "
+             f"invisible in time ({pct(eodw.get('6 to 24 h'))} of 6 to 24 hour schemes are caught while running), "
+             f"however good the model is. The same model scored live would catch {pct(livew.get('Under 6 h'))} of "
+             "schemes under 6 hours, so live scoring is the single change with the biggest gain in speed.",
+             ["**Which half of BQ1 this answers.** It turns 'how early is early?' into one number: the minimum time "
+              "a scheme has to keep moving money for today's daily alert to reach analysts before it ends.",
+              "**What the shape tells us.** The orange line (end of day) is flat at 0% for short schemes and jumps "
+              "above 80% once schemes run longer than a day. That step is the daily batch, not the model: the blue "
+              "line, the same model scored as payments arrive, is high for every length except same-minute schemes.",
+              "**What follows.** The gap between the two lines is what live scoring would add, and it sits entirely "
+              "in schemes shorter than a day.",
+              "**The decision it supports.** It is the cost case for live scoring: an architecture change (scoring "
+              "each payment as it lands) rather than more model tuning. Same-minute schemes stay out of reach for "
+              "any design."], read=(
+                 "Schemes are grouped by how long they run (bottom axis). Each line is the share caught while still "
+                 "running: orange with today's end-of-day alert, blue if payments were scored as they arrive."))
