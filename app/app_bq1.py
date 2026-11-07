@@ -17,12 +17,18 @@ import streamlit as st
 
 # final model; after the full HI-Large run, point this (or env BQ1_DATA) at that run's file
 DATA_FILE = os.environ.get("BQ1_DATA", "dashboard_data_enrui_breann_mld20.json")
-BLUE, ORANGE, GREY, INK = "#2F7FAD", "#E07B39", "#B9B2A8", "#262626"
-RAG = {"Red": "#F2C9C4", "Yellow": "#F8E7B0", "Green": "#CFE8CC"}
+BLUE, ORANGE, GREY, INK = "#3987e5", "#d95926", "#898781", "#c9c2dc"   # validated on the dark purple surface
+RAG = {"Red": "#5a2330", "Yellow": "#5a4517", "Green": "#1e4a2c"}   # dark status tints; the word is always shown too
 ACTION = {"Red": "Analysts check these by hand", "Yellow": "Spot-check a sample",
           "Green": "Let the model handle it"}
 LAYERING = {"stack", "bipartite"}           # stage 2 names these two together as "layering"
 VALIDATION_TOP2 = 0.82                      # enrui_breann_mld20_grp, HI-Small + HI-Medium validation
+# Red / green cut-offs, frozen from the validation baseline (txn_v3m, results/final/validate_report.txt) before
+# testing, like the alert threshold, so every run is judged against the same bar:
+#   recall: named-pattern recall 88.9% / 87.7% -> green from 88%, red 10 points below
+#   precision: validation precision 90.9% / 89.4% -> green from 90%, red 10 points below
+#   speed: green when most schemes (50%) are caught while still running, red below 40%
+CUTOFFS = {"recall": (0.78, 0.88), "precision": (0.80, 0.90), "speed": (0.40, 0.50)}
 
 st.set_page_config(page_title="BQ1 · Early detection", layout="wide")
 
@@ -72,252 +78,341 @@ sc = pd.DataFrame(d.get("schemes") or [])              # one row per scheme (new
 top2 = pd.DataFrame(d.get("top2") or [])
 
 # ------------------------------------------------------------------ header
-st.title("Catching laundering early, at a volume analysts can manage")
-st.markdown("**For the Transaction Monitoring Tuning Team**, who decide how many alerts go to analysts each day "
-            "and which laundering patterns need a person to check.")
-st.markdown("**BQ1:** How can we automatically detect laundering patterns **early**, while keeping false alerts "
-            "low enough for analysts to manage?")
-st.caption(f"Tested once on {days} unseen days of HI-Large ({frozen['date_from'][:10]} to {frozen['date_to'][:10]}), "
-           f"{frozen['payments'] / 1e6:.1f}M payments · trained on HI-Small and HI-Medium only")
+st.title("BQ1 · Early detection")
+st.markdown("<div style='font-size:1.6rem;line-height:1.35;font-weight:600;margin:.1rem 0 .5rem'>How can we "
+            "automatically detect laundering patterns early, while keeping false alerts low enough for analysts "
+            "to manage?</div>", unsafe_allow_html=True)
+st.caption(f"Tested once on {days} "
+           f"unseen days of HI-Large ({frozen['date_from'][:10]} to {frozen['date_to'][:10]}, "
+           f"{frozen['payments'] / 1e6:.1f}M payments), trained on HI-Small and HI-Medium only.")
 
-# ------------------------------------------------------------------ 1. alerts and accuracy
-st.subheader("1 · Alerts and accuracy: how many alerts a day?")
-st.caption("Each day, accounts are ranked by risk score and the top ones become alerts. "
-           "Pick a daily volume to see what it catches and what it costs.")
 
-opts = ad[ad["cutoff"].str.startswith("top") | (ad["cutoff"] == "frozen_threshold")].copy()
-opts["k"] = opts["alerts_per_day"].round().astype(int)
-opts = opts.sort_values("k")
-default = 2000 if 2000 in opts["k"].tolist() else thr_k
-pick = st.select_slider("Alerts reviewed per day", options=opts["k"].tolist(), value=default,
-                        format_func=lambda v: f"{v:,} (model's threshold)" if v == thr_k else f"{v:,}")
-row = opts[opts["k"] == pick].iloc[0]
-laundering_day = row["positives"] / days
+tab1, tab2, tab3, tab4 = st.tabs([":material/notifications: Alerts & accuracy", ":material/timer: Speed", ":material/groups: Who checks what", ":material/search: The alert"])
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Alerts per day", f"{pick:,}")
-m2.metric("Real laundering alerts", per_day(pick * row["precision"]), f"{pct(row['precision'])} precision",
-          delta_color="off", delta_arrow="off",
-          help="Alerts that really were laundering. Precision = real alerts / all alerts.")
-m3.metric("Laundering missed per day", per_day(laundering_day * (1 - row["recall"])),
-          f"{pct(1 - row['recall'])} of laundering (1 - recall)", delta_color="off", delta_arrow="off",
-          help="Laundering account-days that got no alert, including laundering that follows no known pattern.")
-m4.metric("False alerts per day", per_day(pick * (1 - row["precision"])),
-          help="Alerts analysts clear that turn out not to be laundering.")
+with tab1:
+    # ------------------------------------------------------------------ 1. alerts and accuracy
+    st.subheader(f"{pct(frozen['precision'])} of alerts are real, but they reach only {pct(frozen['recall'])} of laundering")
+    st.caption("How many alerts a day, and what they catch")
+    with st.expander("How to read this"):
+        st.caption("Each day the model gives every account a risk score, and the riskiest accounts become alerts. "
+        "One alert is one account on one day.")
+    st.caption(f"**How to use:** drag the slider to the number of alerts your team can review a day. The four numbers and "
+            f"the chart follow it. It starts at the model's own setting ({thr_k:,} a day), which sections 2 to 4 use.")
 
-long = opts.melt(id_vars="k", value_vars=["precision", "recall"], var_name="measure", value_name="value")
-long["measure"] = long["measure"].map({"precision": "Alerts that are real (precision)",
-                                       "recall": "Laundering caught (recall)"})
-x = alt.X("k:O", title="Alerts reviewed per day", sort=opts["k"].tolist(), axis=alt.Axis(labelAngle=0, format=","))
-base = alt.Chart(long).encode(
-    x=x, y=alt.Y("value:Q", title=None, axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
-    color=alt.Color("measure:N", scale=alt.Scale(range=[BLUE, ORANGE]),
-                    legend=alt.Legend(title=None, orient="top", labelLimit=0)))
-lines = base.mark_line(strokeWidth=2.5) + base.mark_point(filled=True, size=60).encode(
-    tooltip=[alt.Tooltip("k:O", title="Alerts/day", format=","), "measure:N", alt.Tooltip("value:Q", format=".1%")])
-rule = alt.Chart(pd.DataFrame({"k": [pick]})).mark_rule(color=INK, strokeDash=[4, 4]).encode(x=x)
-st.altair_chart((lines + rule).properties(height=280), width="stretch")
-st.caption(f"The model's own threshold sends about {thr_k:,} alerts a day; sections 2 to 4 use that setting. "
-           "Past that, most extra alerts are false.")
+    opts = ad[ad["cutoff"].str.startswith("top") | (ad["cutoff"] == "frozen_threshold")].copy()
+    opts["k"] = opts["alerts_per_day"].round().astype(int)
+    opts = opts.sort_values("k")
+    pick = st.select_slider("Alerts your team reviews per day", options=opts["k"].tolist(), value=thr_k,
+                            format_func=lambda v: f"{v:,} (model's setting)" if v == thr_k else f"{v:,}")
+    row = opts[opts["k"] == pick].iloc[0]
+    n_alerts, n_true, n_pos = int(row["alerts"]), int(row["true_alerts"]), int(row["positives"])
+    n_false, n_missed = n_alerts - n_true, n_pos - n_true
 
-st.divider()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Alerts per day", per_day(n_alerts / days),
+              help=f"{n_alerts:,} alerts over the {days} test days, divided by {days}.")
+    m2.metric("Real laundering alerts per day", per_day(n_true / days), f"{pct(row['precision'])} of alerts (precision)",
+              delta_color="off", delta_arrow="off",
+              help=f"Alerts on an account that really laundered money that day, checked against the dataset's answer key: "
+                   f"{n_true:,} of {n_alerts:,} alerts. Precision = {n_true:,} ÷ {n_alerts:,} = {pct(row['precision'])}.")
+    m3.metric("Laundering missed per day", per_day(n_missed / days), f"{pct(1 - row['recall'])} of all laundering (1 − recall)",
+              delta_color="off", delta_arrow="off",
+              help=f"Laundering that got no alert. The answer key has {n_pos:,} laundering account-days in the test days; "
+                   f"{n_true:,} got an alert, so {n_missed:,} were missed ({per_day(n_missed / days)} a day). "
+                   f"Recall = {n_true:,} ÷ {n_pos:,} = {pct(row['recall'])}.")
+    m4.metric("False alerts per day", per_day(n_false / days), f"{pct(1 - row['precision'])} of alerts",
+              delta_color="off", delta_arrow="off",
+              help=f"Alerts on an account that did not launder that day: {n_alerts:,} − {n_true:,} = {n_false:,} "
+                   f"({per_day(n_false / days)} a day). Analysts clear these for nothing.")
 
-# ------------------------------------------------------------------ 2. speed
-st.subheader("2 · Speed: is the scheme caught before it ends?")
-st.caption("A scheme is one laundering operation in the answer key (Patterns.txt), from its first payment to its last. "
-           "Alerts are ready when the day closes, so a scheme that finishes the same day is over before analysts hear of it.")
+    qs = {q["queue"]: q for q in d.get("queues") or []}
+    if {"main", "second", "all"} <= set(qs):
+        main_q, second_q, all_q = qs["main"], qs["second"], qs["all"]
+        with st.container(border=True):
+            st.markdown(f"**:material/call_split: Two queues lift precision to {pct(main_q['precision'])}.** "
+                        f"Alerts the model can't match to any pattern are mostly false, so they go to a second, "
+                        f"lower-priority queue.")
+            q1, q2, q3 = st.columns(3)
+            q1.metric("Main queue: alerts per day", per_day(main_q["alerts"] / main_q["days"]),
+                      f"{pct(main_q['precision'])} real (was {pct(all_q['precision'])})", delta_arrow="off",
+                      help=f"Alerts the namer gives a pattern name: {main_q['true_alerts']:,} of {main_q['alerts']:,} "
+                           f"are real. With every alert in one queue: {all_q['true_alerts']:,} of {all_q['alerts']:,}. "
+                           "Checked on the validation days first: 91.2% -> 94.1% (HI-Medium), 89.7% -> 92.1% "
+                           "(HI-Small). The idea was first spotted on these HI-Large results.")
+            q2.metric("Laundering caught by the main queue", pct(main_q["recall"]),
+                      f"was {pct(all_q['recall'])}", delta_color="off", delta_arrow="off",
+                      help=f"{main_q['true_alerts']:,} of the {main_q['positives']:,} laundering account-days. "
+                           f"The {second_q['true_alerts']:,} real alerts in the second queue are still there to check.")
+            q3.metric("Second queue: alerts per day", per_day(second_q["alerts"] / second_q["days"]),
+                      f"{pct(second_q['precision'])} real", delta_color="off", delta_arrow="off",
+                      help=f"Alerts named 'unclassified': {second_q['true_alerts']:,} of {second_q['alerts']:,} are "
+                           "real. Check these when the main queue is done.")
+            st.caption("At the model's own setting. Counts include alert expansion (linked accounts alerted too), "
+                       "so all-alert precision here is slightly below the number above.")
+    pc = opts[["k", "precision"]].copy()
+    xp = alt.X("k:O", title="Alerts reviewed per day", sort=pc["k"].tolist(), axis=alt.Axis(labelAngle=0, format=","))
+    pline = alt.Chart(pc).mark_line(strokeWidth=2.5, color=BLUE, point=alt.OverlayMarkDef(filled=True, size=60)).encode(
+        x=xp, y=alt.Y("precision:Q", title="Alerts that are real (precision)", axis=alt.Axis(format="%"),
+                      scale=alt.Scale(domain=[0, 1])),
+        tooltip=[alt.Tooltip("k:O", title="Alerts/day", format=","), alt.Tooltip("precision:Q", format=".1%")])
+    prule = alt.Chart(pd.DataFrame({"k": [pick]})).mark_rule(color=INK, strokeDash=[4, 4]).encode(x=xp)
+    st.altair_chart((pline + prule).properties(height=260),
+                    width="stretch")
+    with st.expander("How to read this"):
+        st.caption(f"Up to about 1,000 alerts a day almost every alert is real; past 2,000 the extra alerts are mostly false. "
+        f"About {n_pos / days:,.0f} accounts launder money on an average test day, so {pick:,} alerts a day can "
+        f"find at most {pick:,} of them: reviewing {pick:,} finds {per_day(n_true / days)}.")
 
-pattern_names = sorted(sc["pattern_type"].unique()) if not sc.empty else []
-s1c, s2c = st.columns([1, 2], gap="large")
-with s1c:
-    sel = st.selectbox("Pattern", ["All patterns"] + pattern_names, format_func=lambda p: p if p == "All patterns" else nice(p)) \
-        if pattern_names else "All patterns"
-    sub = sc if sel == "All patterns" or sc.empty else sc[sc["pattern_type"] == sel]
-    if not sub.empty:
-        caught = sub[sub["caught"].astype(bool)]
-        st.metric("Schemes caught", pct(sub["caught"].astype(bool).mean()),
-                  help=f"{len(caught):,} of {len(sub):,} schemes had at least one account alerted.")
-        st.metric("Caught before the scheme ends", pct(sub["caught_before_end_eod"].fillna(False).astype(bool).mean()),
-                  help="The end-of-day alert arrived before the scheme's last payment.")
-        st.metric("Median time to alert", hours(caught["hours_to_alert"].median()),
-                  help="From the scheme's first payment to the end-of-day alert reaching analysts (caught schemes).")
-        st.metric("Median scheme length", hours(sub["duration_h"].median()), help="First payment to last payment.")
+
+with tab2:
+    # ------------------------------------------------------------------ 2. speed
+    _eod = sc["caught_before_end_eod"].fillna(False).astype(bool).mean() if not sc.empty else tot["alert_before_end_eod"]
+    st.subheader(f"{pct(_eod)} of schemes are alerted while they are still running")
+    st.caption("How fast schemes are caught, compared with how long they last")
+    with st.expander("How to read this"):
+        st.caption("A scheme is one laundering operation in the dataset's answer key (Patterns.txt): a set of payments with a "
+        "first and a last payment time. Only schemes that started in the test days are counted.")
+    st.caption("**How to use:** pick a pattern (or all), then choose when a scheme counts as detected: when the end-of-day "
+            "alert reaches analysts (today's process) or when its first payment is flagged (if payments were scored as "
+            "they happen). The numbers on the left and the chart both follow your choice.")
+
+    if sc.empty:
+        st.info("Per-scheme timings are missing from the data file: rerun local/reports/final_report.py.")
     else:
-        st.metric("Schemes caught", pct(tot["caught"]))
-        st.metric("Caught before the scheme ends", pct(tot["alert_before_end_eod"]))
-        st.metric("Median scheme length", hours(tot["median_duration_h"]))
+        EOD, LIVE = "End-of-day alert (today's process)", "First flagged payment (if scored live)"
+        c1, c2 = st.columns([1, 2], gap="large")
+        sel = c1.selectbox("Pattern", ["All patterns"] + sorted(sc["pattern_type"].unique()),
+                           format_func=lambda p: p if p == "All patterns" else nice(p))
+        clock = c2.radio("When does a scheme count as detected?", [EOD, LIVE], horizontal=True,
+                         help="End-of-day: alerts are made when the day closes, so analysts hear at midnight after the first "
+                              "day any of the scheme's accounts is alerted. First flagged payment: the moment one of the "
+                              "scheme's payments scores above the threshold; only reachable if payments were scored as "
+                              "they happen, so it is a best case.")
+        sub = sc if sel == "All patterns" else sc[sc["pattern_type"] == sel]
+        live = clock == LIVE
+        det = sub["hours_to_first_flag" if live else "hours_to_alert"].astype(float)
+        dur = sub["duration_h"].astype(float)
+        found = det.notna()
+        running = found & ((det < dur) if live else sub["caught_before_end_eod"].fillna(False).astype(bool))
+        when = "the first flagged payment" if live else "the end-of-day alert reaching analysts"
 
-with s2c:
-    if not sub.empty:
-        clock = st.radio("When does detection count?", ["End-of-day alert (what analysts get)",
-                                                        "First high-risk payment (if scored live)"], horizontal=True)
-        det_col = "hours_to_alert" if clock.startswith("End") else "hours_to_first_flag"
-        t = np.arange(0, 169, 2)
-        dur = sub["duration_h"].to_numpy()
-        det = np.where(sub["caught"].astype(bool), sub[det_col].astype(float), np.inf)
-        curve = pd.DataFrame({"h": np.concatenate([t, t]),
-                              "share": np.concatenate([[(dur <= v).mean() for v in t], [(det <= v).mean() for v in t]]),
-                              "line": ["Scheme finished"] * len(t) + ["Scheme detected"] * len(t)})
-        med = float(np.median(det[np.isfinite(det)])) if np.isfinite(det).any() else None
-        xh = alt.X("h:Q", title="Hours since the scheme's first payment", scale=alt.Scale(domain=[0, 168]),
-                   axis=alt.Axis(values=list(range(0, 169, 24))))
-        cl = alt.Chart(curve).mark_line(strokeWidth=2.5, interpolate="step-after").encode(
-            x=xh, y=alt.Y("share:Q", title="Share of schemes", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
-            color=alt.Color("line:N", scale=alt.Scale(domain=["Scheme finished", "Scheme detected"], range=[GREY, ORANGE]),
+        s1c, s2c = st.columns([1, 2], gap="large")
+        with s1c:
+            st.metric("Schemes", f"{len(sub):,}", help="Schemes in Patterns.txt that started in the test days.")
+            st.metric("Detected", pct(found.mean()),
+                      help=f"Schemes with {when} at any time: {found.sum():,} of {len(sub):,}. End-of-day can be slightly "
+                           "higher than live: when an account is alerted, its linked accounts are alerted too (alert "
+                           "expansion), so a scheme can get an alert without any of its own payments scoring above the "
+                           "threshold.")
+            st.metric("Detected while still running", pct(running.mean()),
+                      help=f"Schemes where {when} came before the scheme's last payment, so there was still something to "
+                           f"stop: {running.sum():,} of {len(sub):,}.")
+            st.metric("Median time to detection", hours(det[found].median()),
+                      help=f"Hours from the scheme's first payment to {when}, middle value over the {found.sum():,} "
+                           "detected schemes.")
+            st.metric("Median scheme length", hours(dur.median()),
+                      help=f"Hours from the scheme's first payment to its last, middle value over {len(sub):,} schemes.")
+
+        with s2c:
+            t = np.arange(0, 169, 2)
+            det_inf = det.fillna(np.inf).to_numpy()
+            over_lbl, found_lbl = "Schemes already over (last payment made)", "Schemes already detected"
+            curve = pd.DataFrame({"h": np.concatenate([t, t]),
+                                  "share": np.concatenate([[(dur <= v).mean() for v in t], [(det_inf <= v).mean() for v in t]]),
+                                  "line": [over_lbl] * len(t) + [found_lbl] * len(t)})
+            xh = alt.X("h:Q", title="Hours since the scheme's first payment", scale=alt.Scale(domain=[0, 168]),
+                       axis=alt.Axis(values=list(range(0, 169, 24))))
+            cl = alt.Chart(curve).mark_line(strokeWidth=2.5, interpolate="step-after").encode(
+                x=xh, y=alt.Y("share:Q", title="Share of schemes", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
+                color=alt.Color("line:N", scale=alt.Scale(domain=[over_lbl, found_lbl], range=[GREY, ORANGE]),
+                                legend=alt.Legend(title=None, orient="bottom", labelLimit=0)),
+                tooltip=[alt.Tooltip("h:Q", title="Hours"), "line:N", alt.Tooltip("share:Q", format=".0%")])
+            st.altair_chart(cl.properties(height=320), width="stretch")
+            at24 = lambda s: pct((s <= 24).mean())
+            with st.expander("How to read this"):
+                st.caption(f"How to read it: pick an hour on the bottom axis. At 24 hours, {at24(dur)} of these schemes have "
+                f"made their last payment (grey) and {at24(pd.Series(det_inf))} have been detected (orange). "
+                f"Grey starts at {pct((dur <= 0).mean())} because that many schemes make all their payments within "
+                "the same minute, so they are over before any alert exists. The two lines compare the whole group; "
+                "the per-scheme answer is 'Detected while still running' on the left.")
+
+
+with tab3:
+    # ------------------------------------------------------------------ 3. which patterns need people
+    st.subheader("Which patterns the model can handle, and which need analysts")
+    with st.expander("How to read this"):
+        st.caption("Each pattern gets a colour from three numbers, with cut-offs fixed on the validation data (HI-Small and "
+        "HI-Medium) before testing. Laundering caught: green from 88%, red below 78%. Alerts that are real: green "
+        "from 90%, red below 80%. Caught before it ends: green from 50%, red below 40%. A pattern takes the colour of "
+        "its worst number.")
+    st.caption("**How to use:** read the Status column first. Red patterns need analysts checking by hand, yellow ones a "
+            "spot-check of a sample, green ones can be left to the model. 'Why' names the number that set the colour. "
+            "Hover a column header's (?) for how that column is calculated.")
+    th = CUTOFFS
+
+    pats = pd.DataFrame(d["patterns"])
+    pats = pats[pats["level"] == "account_day"].copy()
+    prec = {r["predicted_pattern"]: r["truly_laundering"] for r in d.get("alerts_by_predicted_pattern", [])}
+    spd = pd.DataFrame(d["schemes_by_pattern"]).set_index("pattern_type")
+    s2 = pd.DataFrame(d["stage2"])
+    s2 = s2[s2["mode"] == "caught"].set_index("pattern") if not s2.empty else pd.DataFrame()
+    t2i = top2.set_index("true_pattern") if not top2.empty else pd.DataFrame()
+    alert_med = sc[sc["caught"].astype(bool)].groupby("pattern_type")["hours_to_alert"].median() if not sc.empty else pd.Series(dtype=float)
+
+    rows = []
+    for _, r in pats.iterrows():
+        p, c2 = r["pattern_label"], stage2_class(r["pattern_label"])
+        rows.append({
+            "Pattern": nice(p),
+            "recall": r.get("recall_used", r["recall"]) if pd.notna(r.get("recall_used")) else r["recall"],
+            "precision": prec.get(c2),
+            "speed": spd["alert_before_end_eod"].get(p),
+            "Median time to alert": hours(alert_med.get(p)),
+            "Median scheme length": hours(spd["median_duration_h"].get(p)),
+            "Named right (1 guess)": s2["recall"].get(c2) if not s2.empty else None,
+            "Named right (2 guesses)": t2i["top2"].get(c2) if not t2i.empty else None,
+        })
+    tbl = pd.DataFrame(rows)
+
+
+    def rate(v, lo_hi):
+        if v is None or pd.isna(v):
+            return None
+        return "Green" if v >= lo_hi[1] else "Yellow" if v >= lo_hi[0] else "Red"
+
+
+    order = {"Red": 0, "Yellow": 1, "Green": 2}
+    names = {"recall": "few caught", "precision": "many false alerts", "speed": "caught late"}
+    status, why = [], []
+    for _, r in tbl.iterrows():
+        rs = {k: rate(r[k], th[k]) for k in th}
+        rs = {k: v for k, v in rs.items() if v}
+        worst = min(rs.values(), key=order.get)
+        status.append(worst)
+        why.append(", ".join(names[k] for k, v in rs.items() if v == worst) if worst != "Green" else "strong on all three")
+    tbl.insert(1, "Status", status)
+    tbl.insert(2, "Why", why)
+    tbl = tbl.sort_values("Status", key=lambda s: s.map(order), kind="stable").rename(
+        columns={"recall": "Laundering caught", "precision": "Alerts that are real", "speed": "Caught before it ends"})
+    if t2i.empty:
+        tbl = tbl.drop(columns="Named right (2 guesses)")
+    if sc.empty:
+        tbl = tbl.drop(columns="Median time to alert")
+
+    st.markdown(" &nbsp; ".join(f"<span style='background:{RAG[k]};padding:2px 8px;border-radius:4px'>"
+                                f"<b>{k}</b>: {v}</span>" for k, v in ACTION.items()), unsafe_allow_html=True)
+
+    cell_key = {"Laundering caught": "recall", "Alerts that are real": "precision", "Caught before it ends": "speed"}
+    css = pd.DataFrame("", index=tbl.index, columns=tbl.columns)       # colours from the numbers...
+    css["Status"] = [f"background-color: {RAG[v]}; font-weight: 600" for v in tbl["Status"]]
+    for c, k in cell_key.items():
+        css[c] = [f"background-color: {RAG[rate(v, th[k])]}" if rate(v, th[k]) else "" for v in tbl[c]]
+    show = tbl.copy()                                                   # ...shown as text (Streamlit prints blanks as "None")
+    for c in [c for c in tbl.columns if c in cell_key or c.startswith("Named right")]:
+        show[c] = tbl[c].map(pct)
+    col_help = {
+        "Status": "The colour of the pattern's worst number (see the cut-offs above).",
+        "Why": "Which numbers set the colour.",
+        "Laundering caught": "Of this pattern's laundering account-days in the answer key, the share that got an alert "
+                             "(recall for this pattern).",
+        "Alerts that are real": "Of the alerts the model named this pattern, the share that really were laundering "
+                                "(precision for this name). Stack and bipartite share the name 'layering'.",
+        "Caught before it ends": "Of this pattern's schemes, the share where the end-of-day alert reached analysts before "
+                                 "the scheme's last payment.",
+        "Median time to alert": "Hours from a scheme's first payment to its end-of-day alert, middle value over the "
+                                "pattern's detected schemes.",
+        "Median scheme length": "Hours from a scheme's first payment to its last, middle value.",
+        "Named right (1 guess)": "Of this pattern's laundering that got an alert, the share where the model's pattern name "
+                                 "was right.",
+        "Named right (2 guesses)": "Same, counting the alert as right when the true pattern is either of the model's two "
+                                   "guesses.",
+    }
+    st.dataframe(show.style.apply(lambda _: css, axis=None), hide_index=True, width="stretch",
+                 column_config={c: st.column_config.Column(help=h) for c, h in col_help.items() if c in show.columns})
+
+    red = tbl.loc[tbl["Status"] == "Red", "Pattern"].tolist()
+    late = tbl.loc[[rate(v, th["speed"]) != "Green" and pd.notna(v) for v in tbl["Caught before it ends"]], "Pattern"].tolist()
+    st.caption(f"{len(red)} of {len(tbl)} patterns are red ({', '.join(red) or 'none'}). "
+               f"Caught late ({', '.join(p.lower() for p in late)}): these schemes are mostly over within hours, so a daily "
+               "alert arrives after they end, and they need live scoring or analysts watching the accounts. "
+               "Unclassified laundering follows no known shape and is almost never caught.")
+
+
+with tab4:
+    # ------------------------------------------------------------------ 4. what the analyst sees
+    st.subheader("Two guesses put the right pattern in front of the analyst far more often than one")
+    st.caption("Each alert comes with the pattern the model thinks it belongs to. One guess is often wrong, so the "
+               "analyst sees the two most likely patterns and checks those first instead of all eight.")
+    st.caption("**How to use:** the three numbers say how often the pattern name is right. The table below shows real "
+            "alerts as an analyst would get them, next to the true pattern from the answer key, so you can see the "
+            "guesses that go wrong.")
+
+    tg_file = Path(__file__).parent / "data" / "two_guesses_validation.json"
+    tg = json.loads(tg_file.read_text()) if tg_file.exists() else None
+    one_large = s2["recall"].get("MACRO (7 patterns)") if not s2.empty else None
+    g1, g2, g3 = st.columns(3)
+    if tg:
+        g1.metric("Right with one guess", pct(tg["first_macro"]),
+                  help="Validation days (HI-Small + HI-Medium), final namer: of truly laundering alerts with a known "
+                       "pattern, the share whose pattern is the first guess, averaged over the 7 patterns."
+                       + (f" On the HI-Large test the first guess is right {pct(one_large)} of the time." if one_large else ""))
+        g2.metric("Right within two guesses", pct(tg["top2_macro"]),
+                  f"+{(tg['top2_macro'] - tg['first_macro']) * 100:.0f} points with a second guess", delta_arrow="off",
+                  help="Same alerts: the true pattern is the first or the second guess. HI-Large's two-guess score "
+                       "comes with the next full run, which saves second guesses.")
+    g3.metric("Patterns to check", "2 of 8", help="7 pattern names plus 'unclassified'.")
+
+    if tg:
+        tp = pd.DataFrame(tg["patterns"]).assign(name=lambda t: t["pattern"].map(nice))
+        long2 = tp.melt(id_vars=["name", "cases"], value_vars=["first", "top2"], var_name="guess", value_name="right")
+        long2["guess"] = long2["guess"].map({"first": "First guess", "top2": "Within two guesses"})
+        order2 = tp.sort_values("top2", ascending=False)["name"].tolist()
+        y2 = alt.Y("name:N", sort=order2, title=None, axis=alt.Axis(labelLimit=260))
+        link = alt.Chart(tp).mark_rule(color=GREY, strokeWidth=2).encode(y=y2, x="first:Q", x2="top2:Q")
+        dots = alt.Chart(long2).mark_point(filled=True, size=110, opacity=1).encode(
+            y=y2, x=alt.X("right:Q", title="Alerts where the right pattern is shown", axis=alt.Axis(format="%"),
+                          scale=alt.Scale(domain=[0, 1])),
+            color=alt.Color("guess:N", scale=alt.Scale(domain=["First guess", "Within two guesses"], range=[GREY, BLUE]),
                             legend=alt.Legend(title=None, orient="top")),
-            tooltip=[alt.Tooltip("h:Q", title="Hours"), "line:N", alt.Tooltip("share:Q", format=".0%")])
-        layers = cl
-        if med is not None and med <= 168:
-            mr = pd.DataFrame({"h": [med], "label": [f"median detection {hours(med)}"]})
-            layers += alt.Chart(mr).mark_rule(color=ORANGE, strokeDash=[4, 4]).encode(x=xh)
-            layers += alt.Chart(mr).mark_text(align="left", dx=4, dy=-120, color=ORANGE).encode(x=xh, text="label:N")
-        st.altair_chart(layers.properties(height=320), width="stretch")
-        st.caption("Grey: share of schemes already over. Orange: share already detected. Where orange sits below grey, "
-                   "schemes are finishing before anyone is told; the gap is the laundering analysts are too late for.")
+            tooltip=[alt.Tooltip("name:N", title="Pattern"), "guess:N", alt.Tooltip("right:Q", format=".0%"),
+                     alt.Tooltip("cases:Q", format=",", title="Alerts checked")])
+        st.altair_chart((link + dots).properties(height=alt.Step(34)), width="stretch")
+        st.caption("Validation days (HI-Small + HI-Medium), final namer. Cycle and random gain the most from a second "
+                   "guess: their first guess is usually wrong, but the right name is often second.")
+    with st.expander("How to read this"):
+        st.caption("Stage 1 decides how many alerts arrive; the pattern name decides how much work each alert is. The "
+                   "name tells the analyst where to look (a cycle: follow the money coming back; fan in: check the many "
+                   "senders). A wrong name never hides an alert: whether an account is alerted comes from the risk "
+                   "score alone.")
+
+    ex = pd.DataFrame(d.get("alert_examples") or [])
+    if not ex.empty:
+        show = pd.DataFrame({
+            "Day": ex["date"].str[:10], "Account": ex["acct"], "Risk score": ex["score"].round(3),
+            "First guess": [f"{nice(p)} ({c:.0%})" for p, c in zip(ex["predicted_pattern"], ex["pattern_confidence"])],
+            "Second guess": [f"{nice(p)} ({c:.0%})" for p, c in zip(ex["second_pattern"], ex["second_confidence"])],
+            "Linked accounts": ex["g_accounts"], "Actual (answer key)": ex["true_pattern"].map(nice)})
+        st.dataframe(show, hide_index=True, width="stretch")
     else:
-        sp = pd.DataFrame(d["schemes_by_pattern"])
-        sp["pattern"] = sp["pattern_type"].map(nice)
-        bars = alt.Chart(sp).mark_bar(cornerRadiusEnd=3, size=20, color=BLUE).encode(
-            y=alt.Y("pattern:N", sort="-x", title=None),
-            x=alt.X("alert_before_end_eod:Q", title="Schemes caught before they end", axis=alt.Axis(format="%"),
-                    scale=alt.Scale(domain=[0, 1])),
-            tooltip=["pattern:N", alt.Tooltip("alert_before_end_eod:Q", format=".1%"),
-                     alt.Tooltip("median_duration_h:Q", title="Median length (h)", format=".1f")])
-        st.altair_chart((bars + bars.mark_text(align="left", dx=4, color=INK).encode(
-            text=alt.Text("alert_before_end_eod:Q", format=".0%"))).properties(height=280), width="stretch")
-        st.info("The detected-vs-finished timeline needs per-scheme timings: rerun local/reports/final_report.py "
-                "after the full HI-Large run.")
+        eg = pd.DataFrame(d.get("example_groups") or []).head(8)
+        if not eg.empty:
+            st.dataframe(pd.DataFrame({
+                "Day": eg["date"].str[:10], "Group": eg["group_id"],
+                "First guess": [f"{nice(p)} ({c:.0%})" for p, c in zip(eg["predicted_pattern"], eg["pattern_confidence"])],
+                "Linked accounts": eg["g_accounts"], "Payments": eg["g_payments"],
+                "Actual (answer key)": eg["true_pattern"].map(nice)}), hide_index=True, width="stretch")
+            st.caption("Second guesses appear here after the full HI-Large run (final_group_namer.py now saves them).")
 
-st.divider()
+    with st.expander("How to read this, and its limits"):
+        st.markdown(
+            "- An **alert** is one account on one day. **Precision** = share of alerts that are real laundering; "
+            "**recall** = share of laundering that gets an alert.\n"
+            "- The threshold was fixed on HI-Small and HI-Medium validation days and never tuned on HI-Large.\n"
+            "- Schemes and patterns come from the dataset's answer key (`Patterns.txt`), used only to mark results, "
+            "never as model input.\n"
+            "- Speed assumes alerts are ready at midnight after the day closes. \"First high-risk payment\" shows how "
+            "early a live system could react, but each score uses that whole day's payments, so it is an upper bound.\n"
+            "- Stack and bipartite are named together as layering, so they share a precision and naming score.\n"
+            f"- Tested on {days} days of IBM's synthetic AML data; real banks' volumes and patterns will differ."
+        )
 
-# ------------------------------------------------------------------ 3. which patterns need people
-st.subheader("3 · Which patterns can the model handle, and which need analysts?")
-st.caption("Each pattern is rated on the three things above: how much of it is caught (recall), how many of its "
-           "alerts are real (precision), and how often it is caught before the scheme ends (speed). "
-           "A pattern's colour is its worst rating.")
-
-with st.expander("Rating thresholds (red below the first value, green from the second)"):
-    t1, t2, t3 = st.columns(3)
-    th = {"recall": t1.slider("Laundering caught", 0.0, 1.0, (0.70, 0.85), 0.01),
-          "precision": t2.slider("Alerts that are real", 0.0, 1.0, (0.70, 0.90), 0.01),
-          "speed": t3.slider("Caught before it ends", 0.0, 1.0, (0.45, 0.60), 0.01)}
-
-pats = pd.DataFrame(d["patterns"])
-pats = pats[pats["level"] == "account_day"].copy()
-prec = {r["predicted_pattern"]: r["truly_laundering"] for r in d.get("alerts_by_predicted_pattern", [])}
-spd = pd.DataFrame(d["schemes_by_pattern"]).set_index("pattern_type")
-s2 = pd.DataFrame(d["stage2"])
-s2 = s2[s2["mode"] == "caught"].set_index("pattern") if not s2.empty else pd.DataFrame()
-t2i = top2.set_index("true_pattern") if not top2.empty else pd.DataFrame()
-alert_med = sc[sc["caught"].astype(bool)].groupby("pattern_type")["hours_to_alert"].median() if not sc.empty else pd.Series(dtype=float)
-
-rows = []
-for _, r in pats.iterrows():
-    p, c2 = r["pattern_label"], stage2_class(r["pattern_label"])
-    rows.append({
-        "Pattern": nice(p),
-        "recall": r.get("recall_used", r["recall"]) if pd.notna(r.get("recall_used")) else r["recall"],
-        "precision": prec.get(c2),
-        "speed": spd["alert_before_end_eod"].get(p),
-        "Median time to alert": hours(alert_med.get(p)),
-        "Median scheme length": hours(spd["median_duration_h"].get(p)),
-        "Named right (1 guess)": s2["recall"].get(c2) if not s2.empty else None,
-        "Named right (2 guesses)": t2i["top2"].get(c2) if not t2i.empty else None,
-    })
-tbl = pd.DataFrame(rows)
-
-
-def rate(v, lo_hi):
-    if v is None or pd.isna(v):
-        return None
-    return "Green" if v >= lo_hi[1] else "Yellow" if v >= lo_hi[0] else "Red"
-
-
-order = {"Red": 0, "Yellow": 1, "Green": 2}
-names = {"recall": "few caught", "precision": "many false alerts", "speed": "caught late"}
-status, why = [], []
-for _, r in tbl.iterrows():
-    rs = {k: rate(r[k], th[k]) for k in th}
-    rs = {k: v for k, v in rs.items() if v}
-    worst = min(rs.values(), key=order.get)
-    status.append(worst)
-    why.append(", ".join(names[k] for k, v in rs.items() if v == worst) if worst != "Green" else "strong on all three")
-tbl.insert(1, "Status", status)
-tbl.insert(2, "Why", why)
-tbl = tbl.sort_values("Status", key=lambda s: s.map(order), kind="stable").rename(
-    columns={"recall": "Laundering caught", "precision": "Alerts that are real", "speed": "Caught before it ends"})
-if t2i.empty:
-    tbl = tbl.drop(columns="Named right (2 guesses)")
-if sc.empty:
-    tbl = tbl.drop(columns="Median time to alert")
-
-st.markdown(" &nbsp; ".join(f"<span style='background:{RAG[k]};padding:2px 8px;border-radius:4px'>"
-                            f"<b>{k}</b>: {v}</span>" for k, v in ACTION.items()), unsafe_allow_html=True)
-
-cell_key = {"Laundering caught": "recall", "Alerts that are real": "precision", "Caught before it ends": "speed"}
-css = pd.DataFrame("", index=tbl.index, columns=tbl.columns)       # colours from the numbers...
-css["Status"] = [f"background-color: {RAG[v]}; font-weight: 600" for v in tbl["Status"]]
-for c, k in cell_key.items():
-    css[c] = [f"background-color: {RAG[rate(v, th[k])]}" if rate(v, th[k]) else "" for v in tbl[c]]
-show = tbl.copy()                                                   # ...shown as text (Streamlit prints blanks as "None")
-for c in [c for c in tbl.columns if c in cell_key or c.startswith("Named right")]:
-    show[c] = tbl[c].map(pct)
-st.dataframe(show.style.apply(lambda _: css, axis=None), hide_index=True, width="stretch")
-
-n_red = (tbl["Status"] == "Red").sum()
-st.caption(f"{n_red} of {len(tbl)} patterns are red. Fast patterns (fan in, fan out, random) are mostly over within "
-           "hours, so a daily alert arrives after they end: those need live scoring or analysts watching the accounts. "
-           "Unclassified laundering follows no known shape and is almost never caught.")
-
-st.divider()
-
-# ------------------------------------------------------------------ 4. what the analyst sees
-st.subheader("4 · What the analyst sees: the model's two best guesses at the pattern")
-st.caption("Each alert comes with the pattern the model thinks it belongs to. One guess is often wrong, so the "
-           "analyst sees the two most likely patterns and checks those first instead of all eight.")
-
-one = top2.set_index("true_pattern")["top1"].get("ALL") if not top2.empty else \
-    (s2["recall"].get("MACRO (7 patterns)") if not s2.empty else None)
-two = top2.set_index("true_pattern")["top2"].get("ALL") if not top2.empty else None
-g1, g2, g3 = st.columns(3)
-g1.metric("Right with one guess", pct(one), help="Of truly laundering alerts with a known pattern, the share whose "
-                                                 "pattern is the model's first guess.")
-g2.metric("Right within two guesses" + ("" if two is not None else " (validation)"),
-          pct(two) if two is not None else f"~{VALIDATION_TOP2:.0%}",
-          help="The true pattern is the first or second guess." +
-               ("" if two is not None else " Validation result (HI-Small + HI-Medium); HI-Large comes with the full run."))
-g3.metric("Patterns to check", "2 of 8")
-st.caption("The value: a second guess roughly doubles how often the analyst starts from the right pattern, "
-           "at the cost of reading one more name. A wrong name never hides an alert: whether an account is alerted "
-           "comes from the risk score alone.")
-
-ex = pd.DataFrame(d.get("alert_examples") or [])
-if not ex.empty:
-    show = pd.DataFrame({
-        "Day": ex["date"].str[:10], "Account": ex["acct"], "Risk score": ex["score"].round(3),
-        "First guess": [f"{nice(p)} ({c:.0%})" for p, c in zip(ex["predicted_pattern"], ex["pattern_confidence"])],
-        "Second guess": [f"{nice(p)} ({c:.0%})" for p, c in zip(ex["second_pattern"], ex["second_confidence"])],
-        "Linked accounts": ex["g_accounts"], "Actual (answer key)": ex["true_pattern"].map(nice)})
-    st.dataframe(show, hide_index=True, width="stretch")
-else:
-    eg = pd.DataFrame(d.get("example_groups") or []).head(8)
-    if not eg.empty:
-        st.dataframe(pd.DataFrame({
-            "Day": eg["date"].str[:10], "Group": eg["group_id"],
-            "First guess": [f"{nice(p)} ({c:.0%})" for p, c in zip(eg["predicted_pattern"], eg["pattern_confidence"])],
-            "Linked accounts": eg["g_accounts"], "Payments": eg["g_payments"],
-            "Actual (answer key)": eg["true_pattern"].map(nice)}), hide_index=True, width="stretch")
-        st.caption("Second guesses appear here after the full HI-Large run (final_group_namer.py now saves them).")
-
-with st.expander("How to read this, and its limits"):
-    st.markdown(
-        "- An **alert** is one account on one day. **Precision** = share of alerts that are real laundering; "
-        "**recall** = share of laundering that gets an alert.\n"
-        "- The threshold was fixed on HI-Small and HI-Medium validation days and never tuned on HI-Large.\n"
-        "- Schemes and patterns come from the dataset's answer key (`Patterns.txt`), used only to mark results, "
-        "never as model input.\n"
-        "- Speed assumes alerts are ready at midnight after the day closes. \"First high-risk payment\" shows how "
-        "early a live system could react, but each score uses that whole day's payments, so it is an upper bound.\n"
-        "- Stack and bipartite are named together as layering, so they share a precision and naming score.\n"
-        f"- Tested on {days} days of IBM's synthetic AML data; real banks' volumes and patterns will differ."
-    )

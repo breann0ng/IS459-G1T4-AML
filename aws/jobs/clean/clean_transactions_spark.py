@@ -28,7 +28,7 @@ Notes
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
@@ -49,6 +49,12 @@ FIRST_DAY = {
     "HI-Large": "2022-08-01",
 }
 
+# Daily mode (Step Functions aml-daily): clean the week of AML_RUN_DATE so far, from the day folders
+# raw/transactions/set=<DATASET>/date=YYYY-MM-DD/ (Monday to that day), and rewrite only that week.
+# Week numbers stay those of the full clean (week 1 is read from curated/transactions).
+# Neither WEEK nor AML_RUN_DATE = the whole dataset, as before.
+RUN_DATE = None if WEEK else os.environ.get("AML_RUN_DATE")   # the weekly argument wins
+
 # Drop the end of a dataset where normal activity collapses (see curated/daily_profile).
 # Format "YYYY-MM-DD HH:MM"; None keeps everything. Set it per dataset after the first run.
 MAX_TIMESTAMP = {
@@ -60,9 +66,15 @@ MAX_TIMESTAMP = {
 ALLOWED_FORMATS = ["ACH", "Bitcoin", "Cash", "Cheque", "Credit Card", "Reinvestment", "Wire"]
 # =========================================================================================
 
-RAW_PATH = f"{ROOT}/raw/transactions/set={DATASET}/" + (f"week={WEEK}/" if WEEK else "")
-if WEEK and BASE not in FIRST_DAY:
-    raise SystemExit(f"Weekly clean needs FIRST_DAY for {BASE} (else every week would be week 1)")
+RAW_PATH = f"{ROOT}/raw/transactions/set={DATASET}/"
+if WEEK:
+    if BASE not in FIRST_DAY:
+        raise SystemExit(f"Weekly clean needs FIRST_DAY for {BASE} (else every week would be week 1)")
+    RAW_PATH = f"{RAW_PATH}week={WEEK}/"
+elif RUN_DATE:
+    _d = date.fromisoformat(RUN_DATE)
+    _days = [(_d - timedelta(days=i)).isoformat() for i in range(_d.weekday(), -1, -1)]   # Monday .. day
+    RAW_PATH = f"{RAW_PATH}date={{{','.join(_days)}}}/"
 OUT = f"{ROOT}/curated"
 AMOUNT_TYPE = "decimal(28,8)"   # 8 decimals: Bitcoin amounts are tiny (e.g. 0.00843)
 RUN_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -123,12 +135,24 @@ def parse(df):
         .withColumn("is_laundering", F.col("is_laundering_raw").cast("int")))
 
 
+def first_week_start(df, week_start):
+    """Monday of week 1. Weekly mode: the dataset's FIRST_DAY (the file holds one week, so its own
+    minimum is not week 1). Daily mode: from the full clean, so a week-to-date run keeps its week number."""
+    if WEEK:
+        return spark.range(1).select(F.to_date(F.date_trunc("week", F.lit(FIRST_DAY[BASE])))).first()[0]
+    if RUN_DATE:
+        w1 = (spark.read.parquet(f"{OUT}/transactions")
+                   .filter((F.col("dataset") == DATASET) & (F.col("week") == 1))
+                   .select(F.min(F.to_date(F.date_trunc("week", "txn_time")))).first()[0])
+        if w1 is None:
+            raise SystemExit(f"daily mode needs the full clean of {DATASET} first (curated/transactions week 1)")
+        return w1
+    return df.select(F.min(week_start)).first()[0]
+
+
 def add_week(df):
     week_start = F.to_date(F.date_trunc("week", "txn_time"))
-    if WEEK:    # fixed anchor: this file holds one week, so its own minimum is not week 1
-        first_week = spark.range(1).select(F.to_date(F.date_trunc("week", F.lit(FIRST_DAY[BASE])))).first()[0]
-    else:
-        first_week = df.select(F.min(week_start)).first()[0]
+    first_week = first_week_start(df, week_start)
     week = F.floor(F.datediff(week_start, F.lit(first_week)) / 7) + 1
     return df.withColumn("week", F.coalesce(week.cast("int"), F.lit(0)))
 

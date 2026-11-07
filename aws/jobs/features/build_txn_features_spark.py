@@ -43,6 +43,12 @@ DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
 FEATURES_TABLE = sys.argv[2] if len(sys.argv) > 2 else "features_v2"
 CHUNK_FROM = sys.argv[3] if len(sys.argv) > 3 else None    # optional chunk (inclusive dates)
 CHUNK_TO = sys.argv[4] if len(sys.argv) > 4 else None
+# Daily mode (Step Functions aml-daily): with no chunk given, build the week of AML_RUN_DATE so far
+# (Monday to that day). The chunk still reads its look-back history and rewrites only that week.
+if os.environ.get("AML_RUN_DATE") and not CHUNK_FROM:
+    import datetime as _dt
+    _d = _dt.date.fromisoformat(os.environ["AML_RUN_DATE"])
+    CHUNK_FROM, CHUNK_TO = (_d - _dt.timedelta(days=_d.weekday())).isoformat(), _d.isoformat()
 
 # Full rows are written only from this day on (validation + test). None = every day (HI-Large).
 # These match train_ml.py's cross_dataset split (last 25% of days = validation).

@@ -97,6 +97,12 @@ RANDOM_SEED = 42
 # Optional chunk, from the command line: OUTPUT_FROM and OUTPUT_TO ("YYYY-MM-DD", inclusive)
 OUTPUT_FROM = sys.argv[2] if len(sys.argv) > 2 else None
 OUTPUT_TO = sys.argv[3] if len(sys.argv) > 3 else None
+# Daily mode (Step Functions aml-daily): with no chunk given, build the week of AML_RUN_DATE so far
+# (Monday to that day). The chunk still reads its look-back history and rewrites only that week.
+if os.environ.get("AML_RUN_DATE") and not OUTPUT_FROM:
+    import datetime as _dt
+    _d = _dt.date.fromisoformat(os.environ["AML_RUN_DATE"])
+    OUTPUT_FROM, OUTPUT_TO = (_d - _dt.timedelta(days=_d.weekday())).isoformat(), _d.isoformat()
 LOOKBACK_DAYS = 21             # history read before OUTPUT_FROM (> the longest window, 14 days)
 SHUFFLE_PARTITIONS = int(os.environ.get("AML_SHUFFLE", 400))   # env override: local tests only
 # =========================================================================================
