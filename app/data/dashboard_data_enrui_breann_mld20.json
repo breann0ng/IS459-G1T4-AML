@@ -23743,5 +23743,34 @@
   }
  ],
  "top2": [],
- "alert_examples": []
+ "alert_examples": [],
+ "queues": [
+  {
+   "queue": "all",
+   "alerts": 32228,
+   "true_alerts": 28743,
+   "positives": 55060,
+   "days": 14,
+   "precision": 0.891864217450664,
+   "recall": 0.5220305121685435
+  },
+  {
+   "queue": "main",
+   "alerts": 29841,
+   "true_alerts": 28311,
+   "positives": 55060,
+   "days": 14,
+   "precision": 0.9487282597768172,
+   "recall": 0.5141845259716673
+  },
+  {
+   "queue": "second",
+   "alerts": 2387,
+   "true_alerts": 432,
+   "positives": 55060,
+   "days": 14,
+   "precision": 0.1809803100125681,
+   "recall": 0.007845986196876134
+  }
+ ]
 }

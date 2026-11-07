@@ -124,6 +124,31 @@ with tab1:
               delta_color="off", delta_arrow="off",
               help=f"Alerts on an account that did not launder that day: {n_alerts:,} − {n_true:,} = {n_false:,} "
                    f"({per_day(n_false / days)} a day). Analysts clear these for nothing.")
+
+    qs = {q["queue"]: q for q in d.get("queues") or []}
+    if {"main", "second", "all"} <= set(qs):
+        main_q, second_q, all_q = qs["main"], qs["second"], qs["all"]
+        with st.container(border=True):
+            st.markdown(f"**:material/call_split: Two queues lift precision to {pct(main_q['precision'])}.** "
+                        f"Alerts the model can't match to any pattern are mostly false, so they go to a second, "
+                        f"lower-priority queue.")
+            q1, q2, q3 = st.columns(3)
+            q1.metric("Main queue: alerts per day", per_day(main_q["alerts"] / main_q["days"]),
+                      f"{pct(main_q['precision'])} real (was {pct(all_q['precision'])})", delta_arrow="off",
+                      help=f"Alerts the namer gives a pattern name: {main_q['true_alerts']:,} of {main_q['alerts']:,} "
+                           f"are real. With every alert in one queue: {all_q['true_alerts']:,} of {all_q['alerts']:,}. "
+                           "Checked on the validation days first: 91.2% -> 94.1% (HI-Medium), 89.7% -> 92.1% "
+                           "(HI-Small). The idea was first spotted on these HI-Large results.")
+            q2.metric("Laundering caught by the main queue", pct(main_q["recall"]),
+                      f"was {pct(all_q['recall'])}", delta_color="off", delta_arrow="off",
+                      help=f"{main_q['true_alerts']:,} of the {main_q['positives']:,} laundering account-days. "
+                           f"The {second_q['true_alerts']:,} real alerts in the second queue are still there to check.")
+            q3.metric("Second queue: alerts per day", per_day(second_q["alerts"] / second_q["days"]),
+                      f"{pct(second_q['precision'])} real", delta_color="off", delta_arrow="off",
+                      help=f"Alerts named 'unclassified': {second_q['true_alerts']:,} of {second_q['alerts']:,} are "
+                           "real. Check these when the main queue is done.")
+            st.caption("At the model's own setting. Counts include alert expansion (linked accounts alerted too), "
+                       "so all-alert precision here is slightly below the number above.")
     pc = opts[["k", "precision"]].copy()
     xp = alt.X("k:O", title="Alerts reviewed per day", sort=pc["k"].tolist(), axis=alt.Axis(labelAngle=0, format=","))
     pline = alt.Chart(pc).mark_line(strokeWidth=2.5, color=BLUE, point=alt.OverlayMarkDef(filled=True, size=60)).encode(
