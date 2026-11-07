@@ -211,6 +211,132 @@ with tab2:
                 "the same minute, so they are over before any alert exists. The two lines compare the whole group; "
                 "the per-scheme answer is 'Detected while still running' on the left.")
 
+        # ---------------------------------------------------------- 2a. per pattern: length vs time to detection
+        det_col = "hours_to_first_flag" if live else "hours_to_alert"
+        clock_word = "the first flagged payment" if live else "the end-of-day alert"
+        st.divider()
+        st.markdown("#### :material/schedule: Per pattern: how long schemes last vs how long until they are detected")
+        pm = pd.DataFrame([{"pattern": nice(p), "length_h": g["duration_h"].astype(float).median(),
+                            "detect_h": g[det_col].astype(float).median(), "schemes": len(g)}
+                           for p, g in sc.groupby("pattern_type")])
+        pml = pm.melt(id_vars=["pattern", "schemes"], value_vars=["length_h", "detect_h"], var_name="m", value_name="hours")
+        pml["m"] = pml["m"].map({"length_h": "Median scheme length", "detect_h": "Median time to detection"})
+        ya = alt.Y("pattern:N", sort=pm.sort_values("length_h")["pattern"].tolist(), title=None,
+                   axis=alt.Axis(labelLimit=260))
+        link_a = alt.Chart(pm).mark_rule(color=GREY, strokeWidth=2).encode(y=ya, x="length_h:Q", x2="detect_h:Q")
+        dots_a = alt.Chart(pml).mark_point(filled=True, size=110, opacity=1).encode(
+            y=ya, x=alt.X("hours:Q", title="Hours from the scheme's first payment (median)"),
+            color=alt.Color("m:N", scale=alt.Scale(domain=["Median scheme length", "Median time to detection"],
+                                                   range=[GREY, ORANGE]), legend=alt.Legend(title=None, orient="top")),
+            tooltip=[alt.Tooltip("pattern:N", title="Pattern"), "m:N", alt.Tooltip("hours:Q", format=".1f"),
+                     alt.Tooltip("schemes:Q", format=",")])
+        st.altair_chart((link_a + dots_a).properties(height=alt.Step(34)), width="stretch")
+        inst_p = pm[pm["length_h"] <= 0]["pattern"].tolist()
+        late = pm[(pm["length_h"] > 0) & (pm["detect_h"] > pm["length_h"])].sort_values("length_h")["pattern"].tolist()
+        on_time = pm[(pm["length_h"] > 0) & (pm["detect_h"] <= pm["length_h"])].sort_values(
+            "length_h", ascending=False)["pattern"].tolist()
+        low = lambda ps: ", ".join(p.lower() for p in ps)
+        parts = []
+        if inst_p:
+            parts.append(f"most {low(inst_p)} schemes make all their payments within a minute, so they can only be "
+                         "detected after they end")
+        if late:
+            parts.append(f"the typical {low(late)} scheme is over before {clock_word} (orange right of grey)")
+        if on_time:
+            parts.append(f"{low(on_time)} schemes run long enough to be caught in time")
+        st.info(f"**Takeaway:** with {clock_word}, " + "; ".join(parts) + ".", icon=":material/lightbulb:")
+        with st.expander("How this answers BQ1, and why it matters"):
+            st.markdown(
+                "- BQ1 asks whether we detect laundering **early**. Early only means something next to how long a scheme "
+                "lasts: 13 hours is fast for a scheme that runs for days, and too late for one that ends in an hour.\n"
+                "- The gap between the two dots is the time an analyst has to act (orange left of grey) or the time the "
+                "scheme had already finished (orange right of grey).\n"
+                "- Use: patterns with orange right of grey need a faster process (live scoring) or manual monitoring of "
+                "the accounts involved; the others can rely on the daily alert.")
+
+        # ---------------------------------------------------------- 2b. caught within the scheme's own period
+        st.divider()
+        st.markdown("#### :material/fact_check: Per pattern: caught within the scheme's own time window")
+        timed = sc[sc["duration_h"].astype(float) > 0]
+        instant = sc[sc["duration_h"].astype(float) <= 0]
+
+        def outcome(g):
+            dg = g[det_col].astype(float)
+            run_ = dg.notna() & ((dg < g["duration_h"].astype(float)) if live
+                                 else g["caught_before_end_eod"].fillna(False).astype(bool))
+            return np.select([run_, dg.notna()], ["Caught while running", "Caught after it ended"], "Not caught")
+
+        oc = timed.assign(outcome=outcome(timed), pattern=timed["pattern_type"].map(nice))
+        share = oc.groupby("pattern")["outcome"].apply(lambda s: (s == "Caught while running").mean())
+        oc_order = share.sort_values(ascending=False).index.tolist()
+        bars_b = alt.Chart(oc).mark_bar(size=18).encode(
+            y=alt.Y("pattern:N", sort=oc_order, title=None, axis=alt.Axis(labelLimit=260)),
+            x=alt.X("count():Q", stack="normalize", title="Share of the pattern's schemes", axis=alt.Axis(format="%")),
+            color=alt.Color("outcome:N", sort=["Caught while running", "Caught after it ended", "Not caught"],
+                            scale=alt.Scale(domain=["Caught while running", "Caught after it ended", "Not caught"],
+                                            range=[BLUE, ORANGE, GREY]), legend=alt.Legend(title=None, orient="top")),
+            order=alt.Order("outcome_rank:Q"),
+            tooltip=[alt.Tooltip("pattern:N", title="Pattern"), "outcome:N", alt.Tooltip("count():Q", title="Schemes")])
+        oc["outcome_rank"] = oc["outcome"].map({"Caught while running": 0, "Caught after it ended": 1, "Not caught": 2})
+        st.altair_chart(bars_b.properties(height=alt.Step(30)), width="stretch")
+        all_run = (outcome(timed) == "Caught while running").mean() if len(timed) else None
+        inst_found = instant[det_col].notna().mean() if len(instant) else None
+        st.caption(f"{len(timed):,} schemes that last longer than a minute. Another {len(instant):,} schemes "
+                   f"({pct(len(instant) / len(sc))}) make all their payments in the same minute: no alert can arrive while "
+                   f"they run, and {pct(inst_found)} of them are detected afterwards.")
+        st.info(f"**Takeaway:** {pct(all_run)} of schemes that last longer than a minute are caught while still running "
+                f"with {clock_word}. Best: {oc_order[0].lower()} ({pct(share.max())}); worst: {oc_order[-1].lower()} "
+                f"({pct(share.min())}).", icon=":material/lightbulb:")
+        with st.expander("How this answers BQ1, and why it matters"):
+            st.markdown(
+                "- Each scheme's own window comes from the answer key (Patterns.txt): its first to its last payment. "
+                "Blue means the alert arrived inside that window, while there was still money left to stop.\n"
+                "- Orange schemes were still found, but only after the last payment: useful for investigation and "
+                "reporting, too late to prevent the loss.\n"
+                "- Same-minute schemes are shown apart because no system can beat them in time; counting them in would "
+                "hide how the model does on schemes it could catch.\n"
+                "- Use: the patterns at the bottom are where analysts should watch accounts closely or where live "
+                "scoring would pay off most.")
+
+        # ---------------------------------------------------------- 2c. the window period
+        st.divider()
+        st.markdown("#### :material/hourglass_bottom: The window: how long must a scheme run to be caught in time?")
+        lab = ["Same minute", "Under 6 h", "6 to 24 h", "1 to 3 days", "Over 3 days"]
+        cut = pd.cut(sub["duration_h"].astype(float), [-0.01, 0, 6, 24, 72, 1e9], labels=lab)
+        fe, fl = sub["hours_to_alert"].astype(float), sub["hours_to_first_flag"].astype(float)
+        run_eod = fe.notna() & sub["caught_before_end_eod"].fillna(False).astype(bool)
+        run_live = fl.notna() & (fl < sub["duration_h"].astype(float))
+        win = pd.concat([
+            pd.DataFrame({"length": cut, "clock": "End-of-day alert (today)", "ok": run_eod}),
+            pd.DataFrame({"length": cut, "clock": "First flagged payment (live)", "ok": run_live})])
+        win = win.groupby(["length", "clock"], observed=True).agg(share=("ok", "mean"), schemes=("ok", "size")).reset_index()
+        xw = alt.X("length:N", sort=lab, title="How long the scheme runs (first to last payment)", axis=alt.Axis(labelAngle=0))
+        lines_c = alt.Chart(win).encode(
+            x=xw, y=alt.Y("share:Q", title="Caught while still running", axis=alt.Axis(format="%"),
+                          scale=alt.Scale(domain=[0, 1])),
+            color=alt.Color("clock:N", scale=alt.Scale(domain=["End-of-day alert (today)", "First flagged payment (live)"],
+                                                       range=[ORANGE, BLUE]), legend=alt.Legend(title=None, orient="top")),
+            tooltip=["length:N", "clock:N", alt.Tooltip("share:Q", format=".0%"), alt.Tooltip("schemes:Q", format=",")])
+        st.altair_chart((lines_c.mark_line(strokeWidth=2.5) + lines_c.mark_point(filled=True, size=80))
+                        .properties(height=300), width="stretch")
+        eodw = win[win["clock"].str.startswith("End")].set_index("length")["share"]
+        first_ok = next((b for b in lab if eodw.get(b, 0) >= 0.8), None)
+        st.info(f"**Takeaway:** the daily alert catches a scheme in time only if it runs for about "
+                f"{'a day or more' if first_ok in ('1 to 3 days', 'Over 3 days') else 'the ' + str(first_ok).lower()}: "
+                f"{pct(eodw.get('6 to 24 h'))} of 6 to 24 hour schemes, {pct(eodw.get('1 to 3 days'))} of 1 to 3 day "
+                "schemes. Scoring payments as they happen would close most of that gap for schemes shorter than a day.",
+                icon=":material/lightbulb:")
+        with st.expander("How this answers BQ1, and why it matters"):
+            st.markdown(
+                "- This is the window period: the minimum time a scheme has to keep moving money for today's daily "
+                "alert to reach analysts before it ends.\n"
+                "- The orange line (end of day) jumps between 'under a day' and 'over a day' because alerts are only "
+                "made when the day closes. The blue line shows the same model scored live: the gap between the lines is "
+                "what live scoring would add.\n"
+                "- Use: it turns 'how early is early?' into a number the Tuning Team can act on, and it gives the cost "
+                "case for live scoring (an architecture change, not a model change).\n"
+                "- Follows the Pattern filter above.")
+
 
 with tab3:
     # ------------------------------------------------------------------ 3. which patterns need people
