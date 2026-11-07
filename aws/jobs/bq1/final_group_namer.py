@@ -73,6 +73,9 @@ def main():
         proba = pd.DataFrame(proba, index=g.index).groupby(g["group_id"]).transform("mean").to_numpy()
     g["predicted_pattern"] = np.array(classes)[proba.argmax(axis=1)]
     g["pattern_confidence"] = proba.max(axis=1)
+    second = np.argsort(-proba, axis=1)[:, 1]           # the analyst sees two guesses: "fan out, or scatter gather"
+    g["second_pattern"] = np.array(classes)[second]
+    g["second_confidence"] = proba[np.arange(len(proba)), second]
     g["true_pattern"] = np.where(g["label"] == 1, S.true_class(g, merge).to_numpy(), "not_laundering")
 
     truth = S.load_table(table("final_truth"), ds.field("dataset") == DATASET)
@@ -93,7 +96,8 @@ def main():
     print(show.round(3).to_string(index=False))
 
     # the analyst's alert list (group id = connected group of alerts, as built above)
-    cols = ["acct_bank", "acct", "date", "score", "predicted_pattern", "pattern_confidence", "group_id",
+    cols = ["acct_bank", "acct", "date", "score", "predicted_pattern", "pattern_confidence",
+            "second_pattern", "second_confidence", "group_id",
             "g_accounts", "g_nodes", "g_payments", "g_days", "g_max_in", "g_max_out", "g_has_cycle",
             "g_longest", "r_role", "label", "true_pattern", "first_laundering_ts"]
     named = g[cols].copy()
