@@ -3,10 +3,12 @@ clean_transactions_spark.py
 Step 1 of BQ1: raw transaction CSV  ->  clean, typed Parquet.
 
 Run (on the EMR master node):
-    spark-submit clean_transactions_spark.py HI-Small
+    spark-submit clean_transactions_spark.py HI-Small                     whole dataset (batch)
+    spark-submit clean_transactions_spark.py HI-Large-live 2022-09-12     one weekly file (aml_bq1_weekly)
 
 Reads
     raw/transactions/set=<DATASET>/*.csv          the Kaggle *_Trans.csv file
+    raw/transactions/set=<DATASET>/week=<WEEK>/   with WEEK: only that week's file (from replay_week.py)
 Writes (Parquet, partitioned by dataset and week; re-running a dataset replaces it)
     curated/transactions/   clean rows the features are built from (no label)
     curated/labels/         txn_id + is_laundering, used only for training and grading
@@ -18,7 +20,9 @@ Notes
     * Every column is read as text first, so account IDs can never be turned into numbers.
     * Bank IDs are cast to integers ("010" -> 10). Bank and account stay separate columns.
     * Amounts keep 8 decimal places, so small Bitcoin payments are not rounded to 0.
-    * Weeks are Monday-to-Sunday; week 1 is the week of the earliest transaction.
+    * Weeks are Monday-to-Sunday; week 1 is the week of the earliest transaction. A weekly run
+      only sees one week, so it counts from the dataset's FIRST_DAY instead (same numbers as batch).
+    * A "-live" dataset (HI-Large-live) is a weekly replay of a Kaggle set and uses its settings.
     * txn_id = SHA-256 of the cleaned values. parse_patterns_spark.py uses the same recipe.
 """
 
@@ -35,6 +39,15 @@ BUCKET = "pw-aml-g1t4"
 ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")      # AML_ROOT is only for local testing
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
+WEEK = sys.argv[2] if len(sys.argv) > 2 else None   # optional: Monday of the one weekly file to clean
+BASE = DATASET.removesuffix("-live")                 # HI-Large-live -> HI-Large settings
+
+# First day of each dataset (from the Kaggle files): weekly runs number weeks from its Monday,
+# so week N means the same dates in a weekly run and a whole-dataset run.
+FIRST_DAY = {
+    "HI-Small": "2022-09-01",
+    "HI-Large": "2022-08-01",
+}
 
 # Drop the end of a dataset where normal activity collapses (see curated/daily_profile).
 # Format "YYYY-MM-DD HH:MM"; None keeps everything. Set it per dataset after the first run.
@@ -47,7 +60,9 @@ MAX_TIMESTAMP = {
 ALLOWED_FORMATS = ["ACH", "Bitcoin", "Cash", "Cheque", "Credit Card", "Reinvestment", "Wire"]
 # =========================================================================================
 
-RAW_PATH = f"{ROOT}/raw/transactions/set={DATASET}/"
+RAW_PATH = f"{ROOT}/raw/transactions/set={DATASET}/" + (f"week={WEEK}/" if WEEK else "")
+if WEEK and BASE not in FIRST_DAY:
+    raise SystemExit(f"Weekly clean needs FIRST_DAY for {BASE} (else every week would be week 1)")
 OUT = f"{ROOT}/curated"
 AMOUNT_TYPE = "decimal(28,8)"   # 8 decimals: Bitcoin amounts are tiny (e.g. 0.00843)
 RUN_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -57,7 +72,7 @@ RAW_COLS = ["ts_raw", "from_bank_raw", "from_account", "to_bank_raw", "to_accoun
             "amount_received_raw", "receiving_currency", "amount_paid_raw",
             "payment_currency", "payment_format", "is_laundering_raw"]
 
-spark = SparkSession.builder.appName(f"CleanTransactions-{DATASET}").getOrCreate()
+spark = SparkSession.builder.appName(f"CleanTransactions-{DATASET}{'-' + WEEK if WEEK else ''}").getOrCreate()
 
 
 def rebalance(df, *cols):
@@ -110,7 +125,10 @@ def parse(df):
 
 def add_week(df):
     week_start = F.to_date(F.date_trunc("week", "txn_time"))
-    first_week = df.select(F.min(week_start)).first()[0]
+    if WEEK:    # fixed anchor: this file holds one week, so its own minimum is not week 1
+        first_week = spark.range(1).select(F.to_date(F.date_trunc("week", F.lit(FIRST_DAY[BASE])))).first()[0]
+    else:
+        first_week = df.select(F.min(week_start)).first()[0]
     week = F.floor(F.datediff(week_start, F.lit(first_week)) / 7) + 1
     return df.withColumn("week", F.coalesce(week.cast("int"), F.lit(0)))
 
@@ -130,7 +148,7 @@ def reject_reason():
          .when(blank("payment_currency") | blank("receiving_currency"), "MISSING_CURRENCY")
          .when(~F.col("payment_format").isin(ALLOWED_FORMATS), "UNKNOWN_FORMAT")
          .when(~F.coalesce(F.col("is_laundering").isin(0, 1), F.lit(False)), "BAD_LABEL"))
-    cutoff = MAX_TIMESTAMP.get(DATASET)
+    cutoff = MAX_TIMESTAMP.get(BASE)
     if cutoff:
         after = F.col("txn_time") > F.to_timestamp(F.lit(cutoff), "yyyy-MM-dd HH:mm")
         reason = F.when(F.col("txn_time").isNotNull() & after, "AFTER_CUTOFF").otherwise(reason)
@@ -226,7 +244,7 @@ def main():
 
     n_raw, n_q = df.count(), quarantine.count()
     n_clean = clean.count()
-    print(f"[clean] {DATASET}: raw={n_raw} quarantined={n_q} "
+    print(f"[clean] {DATASET}{' week ' + WEEK if WEEK else ''}: raw={n_raw} quarantined={n_q} "
           f"duplicates_removed={n_raw - n_q - n_clean} clean={n_clean}")
     print("[clean] daily profile (look for the day normal volume collapses):")
     daily_profile.orderBy("txn_date").show(60, truncate=False)
