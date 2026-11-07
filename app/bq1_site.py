@@ -7,6 +7,11 @@ experiment log: tuning runs on validation data, kept for the report, not for the
 import streamlit as st
 
 st.set_page_config(page_title="AML · G1T4", layout="wide")
+# centre the top menu in the header (Streamlit puts it on the left)
+st.html("""<style>
+  [data-testid="stTopNav"] { position: absolute; left: 50%; transform: translateX(-50%);
+                             width: auto !important; justify-content: center; }
+</style>""")
 pg = st.navigation([
     st.Page("home.py", title="Overview", icon=":material/home:", default=True),
     st.Page("app_bq1.py", title="BQ1 · Early detection", icon=":material/notifications_active:"),
