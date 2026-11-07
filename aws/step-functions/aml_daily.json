@@ -1,5 +1,5 @@
 {
-  "Comment": "aml-daily (BQ1 hot path): one new day of transactions -> clean -> features -> score -> name patterns. Terraform templatefile() fills four placeholders: bucket, emr_app_id, emr_job_role_arn, athena_workgroup.",
+  "Comment": "aml-daily (BQ1 hot path): one new day of transactions -> clean -> features -> score -> name patterns. local/runs/deploy_aml_daily.py (or Terraform templatefile()) fills the placeholders: bucket, code_prefix, final_run, emr_app_id, emr_job_role_arn, athena_workgroup.",
   "StartAt": "Read input",
   "States": {
     "Read input": {
@@ -29,8 +29,8 @@
       "Type": "Pass",
       "Comment": "Spark settings as in local/runs/run_final_serverless.py, plus AML_RUN_DATE: it puts every job in daily mode (this day's week so far; scores and names go to the live_* tables).",
       "Parameters": {
-        "spark.$": "States.Format('--py-files s3://${bucket}/jobs/jobs.zip --conf spark.archives=s3://${bucket}/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://${bucket} --conf spark.executorEnv.AML_ROOT=s3://${bucket} --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.emr-serverless.driverEnv.AML_RUN_DATE={} --conf spark.executorEnv.AML_RUN_DATE={} --conf spark.driver.cores=4 --conf spark.driver.memory=12g --conf spark.driver.maxResultSize=2g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.sql.autoBroadcastJoinThreshold=-1', $.run.date, $.run.date)",
-        "driver.$": "States.Format('--py-files s3://${bucket}/jobs/jobs.zip --conf spark.archives=s3://${bucket}/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://${bucket} --conf spark.executorEnv.AML_ROOT=s3://${bucket} --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.emr-serverless.driverEnv.AML_RUN_DATE={} --conf spark.executorEnv.AML_RUN_DATE={} --conf spark.driver.cores=8 --conf spark.driver.memory=48g --conf spark.dynamicAllocation.initialExecutors=0 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1 --conf spark.emr-serverless.driver.disk=100g', $.run.date, $.run.date)"
+        "spark.$": "States.Format('--py-files s3://${bucket}/${code_prefix}/jobs.zip --conf spark.archives=s3://${bucket}/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://${bucket} --conf spark.executorEnv.AML_ROOT=s3://${bucket} --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=${final_run} --conf spark.executorEnv.AML_FINAL_RUN=${final_run} --conf spark.emr-serverless.driverEnv.AML_RUN_DATE={} --conf spark.executorEnv.AML_RUN_DATE={} --conf spark.driver.cores=4 --conf spark.driver.memory=12g --conf spark.driver.maxResultSize=2g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.sql.autoBroadcastJoinThreshold=-1', $.run.date, $.run.date)",
+        "driver.$": "States.Format('--py-files s3://${bucket}/${code_prefix}/jobs.zip --conf spark.archives=s3://${bucket}/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://${bucket} --conf spark.executorEnv.AML_ROOT=s3://${bucket} --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=${final_run} --conf spark.executorEnv.AML_FINAL_RUN=${final_run} --conf spark.emr-serverless.driverEnv.AML_RUN_DATE={} --conf spark.executorEnv.AML_RUN_DATE={} --conf spark.driver.cores=8 --conf spark.driver.memory=48g --conf spark.dynamicAllocation.initialExecutors=0 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1 --conf spark.emr-serverless.driver.disk=100g', $.run.date, $.run.date)"
       },
       "ResultPath": "$.conf",
       "Next": "Already ran?"
@@ -81,7 +81,7 @@
         "ExecutionRoleArn": "${emr_job_role_arn}",
         "Name.$": "States.Format('aml-daily-clean-{}', $.run.date)",
         "JobDriver": { "SparkSubmit": {
-          "EntryPoint": "s3://${bucket}/jobs/clean_transactions_spark.py",
+          "EntryPoint": "s3://${bucket}/${code_prefix}/clean_transactions_spark.py",
           "EntryPointArguments.$": "States.Array($.run.dataset)",
           "SparkSubmitParameters.$": "$.conf.spark" } },
         "ConfigurationOverrides": { "MonitoringConfiguration": { "S3MonitoringConfiguration": { "LogUri": "s3://${bucket}/logs/emr_serverless/" } } },
@@ -102,7 +102,7 @@
         "ExecutionRoleArn": "${emr_job_role_arn}",
         "Name.$": "States.Format('aml-daily-features-{}', $.run.date)",
         "JobDriver": { "SparkSubmit": {
-          "EntryPoint": "s3://${bucket}/jobs/build_features_spark.py",
+          "EntryPoint": "s3://${bucket}/${code_prefix}/build_features_spark.py",
           "EntryPointArguments.$": "States.Array($.run.dataset)",
           "SparkSubmitParameters.$": "$.conf.spark" } },
         "ConfigurationOverrides": { "MonitoringConfiguration": { "S3MonitoringConfiguration": { "LogUri": "s3://${bucket}/logs/emr_serverless/" } } },
@@ -123,7 +123,7 @@
         "ExecutionRoleArn": "${emr_job_role_arn}",
         "Name.$": "States.Format('aml-daily-txn-features-{}', $.run.date)",
         "JobDriver": { "SparkSubmit": {
-          "EntryPoint": "s3://${bucket}/jobs/build_txn_features_spark.py",
+          "EntryPoint": "s3://${bucket}/${code_prefix}/build_txn_features_spark.py",
           "EntryPointArguments.$": "States.Array($.run.dataset, 'features_v2')",
           "SparkSubmitParameters.$": "$.conf.spark" } },
         "ConfigurationOverrides": { "MonitoringConfiguration": { "S3MonitoringConfiguration": { "LogUri": "s3://${bucket}/logs/emr_serverless/" } } },
@@ -144,7 +144,7 @@
         "ExecutionRoleArn": "${emr_job_role_arn}",
         "Name.$": "States.Format('aml-daily-features-v3-{}', $.run.date)",
         "JobDriver": { "SparkSubmit": {
-          "EntryPoint": "s3://${bucket}/jobs/build_features_v3_spark.py",
+          "EntryPoint": "s3://${bucket}/${code_prefix}/build_features_v3_spark.py",
           "EntryPointArguments.$": "States.Array($.run.dataset)",
           "SparkSubmitParameters.$": "$.conf.spark" } },
         "ConfigurationOverrides": { "MonitoringConfiguration": { "S3MonitoringConfiguration": { "LogUri": "s3://${bucket}/logs/emr_serverless/" } } },
@@ -165,7 +165,7 @@
         "ExecutionRoleArn": "${emr_job_role_arn}",
         "Name.$": "States.Format('aml-daily-score-{}', $.run.date)",
         "JobDriver": { "SparkSubmit": {
-          "EntryPoint": "s3://${bucket}/jobs/score_final_spark.py",
+          "EntryPoint": "s3://${bucket}/${code_prefix}/score_final_spark.py",
           "EntryPointArguments.$": "States.Array($.run.dataset)",
           "SparkSubmitParameters.$": "$.conf.spark" } },
         "ConfigurationOverrides": { "MonitoringConfiguration": { "S3MonitoringConfiguration": { "LogUri": "s3://${bucket}/logs/emr_serverless/" } } },
@@ -186,7 +186,7 @@
         "ExecutionRoleArn": "${emr_job_role_arn}",
         "Name.$": "States.Format('aml-daily-name-{}', $.run.date)",
         "JobDriver": { "SparkSubmit": {
-          "EntryPoint": "s3://${bucket}/jobs/final_group_namer.py",
+          "EntryPoint": "s3://${bucket}/${code_prefix}/final_group_namer.py",
           "EntryPointArguments.$": "States.Array($.run.dataset)",
           "SparkSubmitParameters.$": "$.conf.driver" } },
         "ConfigurationOverrides": { "MonitoringConfiguration": { "S3MonitoringConfiguration": { "LogUri": "s3://${bucket}/logs/emr_serverless/" } } },
