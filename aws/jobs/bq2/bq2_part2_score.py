@@ -15,8 +15,7 @@ Writes  analytics/bq2r_scores/dataset=<dataset>/version=<version>/
 
 import sys
 import time
-from datetime import date
-
+from datetime import date, timedelta
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -27,8 +26,13 @@ import bq2_common as C
 import train_txn as T
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else C.RAMP
-VERSION = sys.argv[2] if len(sys.argv) > 2 else "v0"
-FROM = date.fromisoformat(sys.argv[3]) if len(sys.argv) > 3 else None
+VERSION = sys.argv[2] if len(sys.argv) > 2 else "v0"          # "deployed" = whatever deployed.json points to
+if VERSION == "deployed":
+    _dep = C.deployed_info(DATASET)
+    VERSION = _dep["version"]
+FROM = date.fromisoformat(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] != "-" else None   # "-" = default start
+if FROM is None and sys.argv[2:3] == ["deployed"] and _dep.get("deploy_from"):
+    FROM = date.fromisoformat(_dep["deploy_from"])                # a deployed model is scored from its deploy date
 TO = date.fromisoformat(sys.argv[4]) if len(sys.argv) > 4 else None
 KEEP = ["txn_id", "date", "week", "s_id", "r_id", "label", "pattern_label"]
 
@@ -39,7 +43,7 @@ def main():
     meta = C.get_json(f"{mdir}/meta.json")
     booster = lgb.Booster(model_str=C.get_text(f"{mdir}/stage1.txt"))
     feat, thr = meta["stage1_features"], float(meta["threshold"])
-    start = FROM or date.fromisoformat(meta["train_to"])
+    start = FROM or date.fromisoformat(meta["train_to"]) + timedelta(days=1)   # never score the training days
     f = (ds.field("dataset") == DATASET) & (ds.field("date") >= start)
     if TO:
         f = f & (ds.field("date") <= TO)

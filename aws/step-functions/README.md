@@ -5,6 +5,30 @@ Step Functions starts it, waits for it, retries it, and logs a failure. The jobs
 the scripts in `aws/jobs/` (uploaded to `s3://<bucket>/jobs/` by `aws/deploy/deploy.sh`); a state
 machine only names the S3 path and the arguments, so the two folders are linked by S3 paths only.
 
+BQ2 weekly state machines (generated, do not hand-edit):
+
+- `aml_bq2_weekly.json` (**generated**, do not hand-edit): the BQ2 weekly run, one simulated week per execution.
+  Rebuild with `python aws/step-functions/build_bq2_weekly.py --bucket ... --app-id ... --role-arn ... --topic-arn ... --queue-url ...`.
+  Flow: pick week (input `{"week_index": N}`, else pointer `progress/bq2_weekly.json`) -> parallel
+  [Part 1 drift | score deployed model -> eval `--as-of` week end] -> read `models/bq2r/<ds>/decision_latest.json`
+  -> no alert: advance pointer. Alert: SNS email -> **gate 1** (SQS task token, 7-day timeout) -> train challenger
+  -> score -> eval -> SNS email -> **gate 2** -> `bq2_deploy.py` (writes `deployed.json`) -> advance pointer.
+  Reject or timeout skips to the pointer advance. No automatic retries (each retry costs EMR money).
+  Infra for it: `aws/infra/bq2_weekly.tf` (schedule is created DISABLED).
+- `aml_daily.json`: hot path, started by the EventBridge rule on a new `raw/transactions/` file.
+  read run log -> stop if running/done -> log start -> clean -> features (v2, txn, v3) -> score ->
+  name groups -> log success. Each EMR Serverless step: 2 retries, catch -> log failure.
+  Logging: CloudWatch, level ERROR, include execution data, 90-day retention.
+- `aml_weekly.json`: cold path, EventBridge Scheduler. BQ2 monitor -> drift? -> validate (train_txn) ->
+  final_train (registers a challenger) -> log. A person promotes the model.
+- `aml_bq2_weekly_ibm.json` (**generated** by `build_bq2_weekly_ibm.py`): the same design for IBM HI-Large, one week
+  per execution, pointer `progress/bq2_weekly_ibm.json`, 9 scored weeks (2022-08-29 .. 2022-10-30) + 4 label-only weeks
+  (cases are confirmed 4 weeks late). Parallel [Part 1 real + Part 1 new-tactic test | build features -> txn -> v3 ->
+  score both models (each skipped when `progress/bq2/<step>_<week>.done` exists) -> prep -> eval HI-Large and
+  HI-Large-NT `--as-of` week end] -> alert on HI-Large-NT: the gates of the SAML-D machine, with the BQ1 model as the
+  ready challenger; alert on real HI-Large: email only. Models: `models/bq2_ibm/{final,final_nofan}`.
+  Infra: `aws/infra/bq2_weekly_ibm.tf` (reuses the role, topic and queue of `bq2_weekly.tf`).
+
 | State machine | Started by | Does |
 |---|---|---|
 | `aml_bq1_weekly.asl.json` (BQ1, **deployed**) | EventBridge **rule**: a weekly bank file finished landing in `raw/transactions/set=<dataset>/week=<Monday>/` (its `_SUCCESS` marker) | clean -> patterns -> features v2 -> txn -> v3 -> score -> name patterns |

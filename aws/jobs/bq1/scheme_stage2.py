@@ -56,8 +56,7 @@ from lightgbm import LGBMClassifier
 from sklearn.utils.class_weight import compute_sample_weight
 
 # =============================================================================== SETTINGS
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")      # AML_ROOT is only for local testing
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 PATTERNS = ["fan_in", "fan_out", "gather_scatter", "scatter_gather", "cycle",
             "bipartite", "stack", "random"]
 LINK_DAYS = 2              # same account on days this close = same group

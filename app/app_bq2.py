@@ -11,6 +11,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import aws_data
+
 ORANGE, BLUE, GREY, INK = "#E07B39", "#2F7FAD", "#9A948B", "#262626"
 DATA = Path(__file__).parent / "data"
 NICE = {"Structuring": "structuring", "Smurfing": "smurfing", "Cash_Withdrawal": "cash withdrawal",
@@ -29,9 +31,42 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 
-@st.cache_data
+@st.cache_data(ttl=300)
+def load_aws():
+    return aws_data.load_bq2()
+
+
+REPLAY_START = pd.Timestamp("2023-01-30")      # week_index 0
+LABEL_LAG_DAYS = 28
+WEEKLY_KEYS = ("part1_weekly", "part1_weekly_nb", "part2_weekly", "part2_rules", "part2_rules_v1", "design")
+
+
+def only_processed(d):
+    """With a pipeline pointer present, show the world as of the last processed week: hide later weeks, and hide
+    alerts/decisions that only became known after it (labels arrive 28 days after a week ends)."""
+    nxt = (d.get("progress") or {}).get("week_index")
+    if nxt is None:
+        return d
+    cut_ts = REPLAY_START + pd.Timedelta(days=7 * int(nxt))
+    cut, asof_end = cut_ts.strftime("%Y-%m-%d"), (cut_ts - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    d = dict(d, asof_end=asof_end)
+    # a week's cases are confirmed 28 days after it ends: that is all any chart on this page can know
+    label_end = (cut_ts - pd.Timedelta(days=1 + LABEL_LAG_DAYS))
+    d["label_end"] = label_end.strftime("%Y-%m-%d")
+    label_cut = (label_end - pd.Timedelta(days=6)).strftime("%Y-%m-%d")
+    for k in WEEKLY_KEYS:
+        d[k] = [r for r in d.get(k, []) if r["week_start"] <= label_cut]
+    for k in ("decision", "decision_v1", "decision_latest"):
+        x = d.get(k) or {}
+        if x.get("alert") and x.get("known_on", "") > asof_end:
+            d[k] = {}
+    return d
+
+
+@st.cache_data(ttl=300)
 def load():
-    d = json.loads((DATA / "bq2_data.json").read_text())
+    d = load_aws() if aws_data.enabled() else json.loads((DATA / "bq2_data.json").read_text())
+    d = only_processed(d)
     bq1 = None
     if (DATA / "dashboard_data.json").exists():
         s1 = pd.DataFrame(json.loads((DATA / "dashboard_data.json").read_text())["stage1"])
@@ -46,6 +81,145 @@ def load():
 
 d, P1, W2, T2, DZ, BQ1 = load()
 dec = d.get("decision", {})
+
+
+GATES = {"retrain_gate": ("Retraining approval", "Approving trains a challenger model on every case confirmed so far, "
+                          "scores it and evaluates it. Nothing goes live yet."),
+         "deploy_gate": ("Deployment approval", "Approving makes the challenger the live model from the date below. "
+                         "Rejecting keeps the current model.")}
+
+
+def case_for_retraining(dc):
+    """Evidence for gate 1: how bad is it, which typologies, and are there enough confirmed cases to learn them."""
+    old = dc.get("monitored", "v0")
+    models = d.get("models") or {}
+    seen = set((models.get(old) or {}).get("train_patterns") or [])
+    R_ = pd.DataFrame(d.get("part2_rules", []))
+    t = T2[(T2["version"] == old) & (T2["group"] == "emerging")] if len(T2) else T2
+    if len(R_):
+        base = float(R_["baseline_recall"].iloc[-1])
+        recent = R_.tail(2)
+        hit = int(R_["any_rule"].sum())
+        st.markdown(f"- **Recent recall** (last 2 weeks) **{float(recent['recall'].mean()):.0%}** vs the model's "
+                    f"validation baseline **{base:.0%}**\n- **{hit} of {len(R_)} weeks** broke at least one rule")
+    if len(t):
+        miss = int((t["cases"] - t["caught"]).sum())
+        tt = t.assign(**{"typology": t["typology"].str.replace("_", " "),
+                         "in model's training?": ["yes" if x in seen else "never seen" for x in t["typology"]],
+                         "recall": t["recall"].map("{:.0%}".format)}).rename(
+            columns={"cases": "confirmed cases", "caught": "caught by " + old})
+        st.markdown(f"**New-tactic typologies the model is missing** · {miss} of {int(t['cases'].sum())} "
+                    "confirmed cases slipped through")
+        st.dataframe(tt[["typology", "confirmed cases", "caught by " + old, "recall", "in model's training?"]],
+                     hide_index=True)
+    st.caption("Approve if the missed typologies have enough confirmed cases to learn from. Approving only trains and "
+               "evaluates a challenger (about $0.2 of compute); nothing goes live until the next gate. Reject to keep "
+               f"{old} and keep monitoring.")
+
+
+def compare_models(old, new):
+    """Evidence for gate 2: the challenger against the live model on their own held-out validation data."""
+    mm = d.get("models") or {}
+    a, b = mm.get(old) or {}, mm.get(new) or {}
+    if not b:
+        return
+    va, vb = a.get("validation", {}), b.get("validation", {})
+    rows = [("Recall", va.get("recall"), vb.get("recall"), "{:.1%}"),
+            ("Precision", va.get("precision"), vb.get("precision"), "{:.1%}"),
+            ("F1", va.get("f1"), vb.get("f1"), "{:.3f}"),
+            ("Alerts per day", va.get("alerts_per_day"), vb.get("alerts_per_day"), "{:.1f}"),
+            ("Trained on (confirmed laundering cases)", a.get("train_laundering"), b.get("train_laundering"), "{:,.0f}"),
+            ("Typologies in training", len(a.get("train_patterns") or []), len(b.get("train_patterns") or []), "{}")]
+    st.dataframe(pd.DataFrame([{"": n, f"{old} (live)": f.format(x) if x is not None else "-",
+                                f"{new} (challenger)": f.format(y) if y is not None else "-"} for n, x, y, f in rows]),
+                 hide_index=True)
+    pa, pb = a.get("validation_by_pattern") or {}, b.get("validation_by_pattern") or {}
+    new_pat = [p for p in pb if p not in (a.get("train_patterns") or [])]
+    rest = sorted((p for p in pb if p in pa), key=lambda p: -abs(pb[p]["recall"] - pa[p]["recall"]))[:3]
+    pats = new_pat + rest
+    if pats:
+        lo, ln = f"{old} (live)", f"{new} (challenger)"
+        df = pd.DataFrame([(p.replace("_", " ") + (" *" if p in new_pat else ""), m, (src.get(p) or {}).get("recall", 0.0))
+                           for p in pats for m, src in ((lo, pa), (ln, pb))], columns=["measure", "model", "value"])
+        pal = {lo: ORANGE, ln: BLUE}
+        order = [lo, ln]
+        base = alt.Chart(df).encode(
+            x=alt.X("measure:N", title=None, sort=list(dict.fromkeys(df["measure"])),
+                    axis=alt.Axis(labelAngle=-20, labelLimit=140)),
+            xOffset=alt.XOffset("model:N", sort=order),
+            y=alt.Y("value:Q", title=None, axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1.05])))
+        bar = base.mark_bar().encode(color=alt.Color("model:N", sort=order, legend=alt.Legend(title=None, orient="top"),
+                                                     scale=alt.Scale(domain=order, range=[pal[m] for m in order])),
+                                     tooltip=["model", "measure", alt.Tooltip("value:Q", format=".0%")])
+        txt = base.mark_text(dy=-8, color=INK).encode(text=alt.Text("value:Q", format=".0%"))
+        st.markdown("**Validation recall by typology** (held-out cases)")
+        st.altair_chart((bar + txt).properties(height=260), width="stretch")
+        st.caption(f"* never seen by {old}, so its recall is 0. Each model is validated on its own held-out period, "
+                   "so the two columns are comparable but not identical test sets; real-world proof comes after "
+                   "deployment, once new cases are confirmed.")
+
+
+def approvals_panel():
+    """Human gates of the weekly pipeline: approve or reject retraining / deploying the challenger."""
+    nxt = (d.get("progress") or {}).get("week_index")
+    depl = d.get("deployed") or {}
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Weeks processed", "reference replay" if nxt is None else nxt)
+    c2.metric("Live model", depl.get("version", "v0"), f"from {depl['deploy_from']}" if depl else "initial model",
+              delta_color="off")
+    if c3.button("Refresh from AWS"):
+        load_aws.clear()
+        load.clear()
+        st.session_state.pop("pending", None)
+        st.rerun()
+    latest = d.get("decision_latest") or {}
+    if latest.get("alert"):
+        st.warning(f"Alert for the week of {latest.get('alert_week')}, known {latest.get('known_on')}: "
+                   + "; ".join(latest.get("rules", [])))
+    # the queue hides a message for a few seconds after it is read, so keep what we read for this session
+    if "pending" not in st.session_state:
+        st.session_state["pending"] = aws_data.pending_approvals()
+    items = st.session_state["pending"]
+    for i, it in enumerate(items):
+        title, what = GATES.get(it["gate"], (it["gate"], ""))
+        with st.container(border=True):
+            st.markdown(f"#### {title} · week ending {it['week_end']}")
+            st.write(what)
+            dc = it.get("decision") or {}
+            if dc:
+                st.caption(f"Challenger {dc.get('retrain')} · trained on data to {dc.get('retrain_to')} · "
+                           f"live from {dc.get('deploy_from')} · monitored model {dc.get('monitored')}")
+            if it["gate"] == "retrain_gate":
+                case_for_retraining(dc)
+            if it["gate"] == "deploy_gate":
+                compare_models(dc.get("monitored", "v0"), dc.get("retrain", "v1"))
+            who = st.text_input("Your name (recorded as the approver)", key=f"who{i}")
+            b1, b2 = st.columns(2)
+            choice = "approve" if b1.button("Approve", key=f"ok{i}", type="primary", disabled=not who) else \
+                "reject" if b2.button("Reject", key=f"no{i}", disabled=not who) else None
+            if choice:
+                err = aws_data.answer(it, choice == "approve", who)
+                st.session_state["pending"] = [x for x in items if x is not it]
+                load_aws.clear()
+                load.clear()
+                st.session_state["flash"] = err or f"{choice.title()}d. The pipeline continues; refresh in a few minutes."
+                st.rerun()
+    if st.session_state.get("flash"):
+        st.info(st.session_state.pop("flash"))
+    if not items:
+        st.success("Nothing waiting for approval.")
+
+
+if aws_data.enabled():
+    approvals_panel()
+    if (d.get("progress") or {}).get("week_index") is None:
+        st.info("The weekly pipeline has not processed any week yet, so there is nothing to show. "
+                "Results appear here after each weekly run.")
+        st.stop()
+    st.caption(f"**Pipeline has run through {d['asof_end']}.** Every chart below uses confirmed cases only, and cases "
+               f"are confirmed 28 days after their week ends, so the charts end at the **last week with confirmed "
+               f"cases: the week ending {d['label_end']}**. The weeks after that are not shown because their "
+               "cases are not confirmed yet. An alert for a week appears once its cases are confirmed.")
 
 
 def week_of(ds_, date_str):
@@ -81,8 +255,10 @@ def week_status(ds_):
     return out, base_start, base_end
 
 
-def change_chart(lines, thr, bands=(), rules=(), confirmed=None, ymax=0.6):
-    """lines: DataFrame week, js, series. bands: (from_week, to_week, label). rules: (week, label)."""
+def change_chart(lines, thr, bands=(), rules=(), confirmed=None, ymax=None):
+    """lines: DataFrame week, js, series. bands: (from_week, to_week, label). rules: (week, label).
+    The y range follows the data (never below the threshold) unless ymax is given."""
+    ymax = ymax or max(float(lines["js"].max()), thr) * 1.15
     x = alt.X("week:Q", title="Week", axis=alt.Axis(tickMinStep=1, format="d"),
               scale=alt.Scale(domain=[lines["week"].min(), lines["week"].max()], nice=False))
     layers = []
@@ -179,8 +355,7 @@ def ibm_tab():
     f = lw[lw["dimension"] == "format"].sort_values("week")
     thr = float(f["js_threshold"].iloc[0])
     st.altair_chart(change_chart(f.assign(series="laundering")[["week", "js", "series"]], thr,
-                                 bands=[(1, b0, "simulator warm-up"), (b0, b1 + 1, "baseline")],
-                                 ymax=0.3), width="stretch")
+                                 bands=[(1, b0, "simulator warm-up"), (b0, b1 + 1, "baseline")]), width="stretch")
     st.caption(f"Week 1 = {f['date'].min():%d %b %Y}. Weeks 1–{b0 - 1} are the simulator starting up "
                f"(schemes still being created), so the baseline is Weeks {b0}–{b1}. After it, every week "
                "stays far below the threshold, so no alert is raised and the model is not retrained.")
@@ -364,22 +539,31 @@ with tab_saml:
     lw = P1[(P1["dataset"] == ds_) & (P1["population"] == "laundering")]
     em = DZ[(DZ["group"] == "emerging") & (DZ["payments_ramp"] > 0)].copy()
     em["week"] = [week_of(ds_, w) for w in em["week_start"]]
-    start_wk = int(em["week"].min())
+    start_wk = int(em["week"].min()) if len(em) else None
     tc = lw[lw["tactic_change"] & lw["dimension"].isin(["format", "pattern"])]
-    det_wk = int(tc["week"].min())
+    det_wk = int(tc["week"].min()) if len(tc) else None
     dims = sorted(set(tc["dimension"]), key=["format", "pattern"].index)
-    dep = dec.get("deploy_from")
-
+    # what is live comes from the pipeline's deployed.json; without it (JSON fallback) use the decision file
+    depl = d.get("deployed") or {}
+    live = depl.get("version", "v0") if aws_data.enabled() else None
     dec1 = d.get("decision_v1", {})
-    dep2 = dec1.get("deploy_from") if dec1.get("alert") and "v2" in set(W2["version"]) else None
+    if aws_data.enabled():
+        dep = depl.get("deploy_from") if live in ("v1", "v2") else None
+        dep2 = dec1.get("deploy_from") if live == "v2" else None
+    else:
+        dep = dec.get("deploy_from")
+        dep2 = dec1.get("deploy_from") if dec1.get("alert") and "v2" in set(W2["version"]) else None
+
+    def ratio(a, num, den):
+        return a[num].sum() / a[den].sum() if a[den].sum() else float("nan")
 
     def tot(v, g, frm=None):
-        a = W2[(W2["version"] == v) & (W2["week_start"] >= (frm or dep)) & (W2["group"] == g)]
-        return a["caught"].sum() / a["cases"].sum()
+        return ratio(W2[(W2["version"] == v) & (W2["week_start"] >= (frm or dep)) & (W2["group"] == g)],
+                     "caught", "cases")
 
     def prec(v, frm=None):
-        a = W2[(W2["version"] == v) & (W2["week_start"] >= (frm or dep)) & (W2["group"] == "all")]
-        return a["caught"].sum() / a["alerts"].sum()
+        return ratio(W2[(W2["version"] == v) & (W2["week_start"] >= (frm or dep)) & (W2["group"] == "all")],
+                     "caught", "alerts")
 
     a_wk = week_of(ds_, dec["alert_week"]) if dec.get("alert") else None
     known_wk = week_of(ds_, dec["known_on"]) if dec.get("alert") else None
@@ -387,17 +571,26 @@ with tab_saml:
     a2_wk = week_of(ds_, dec1["alert_week"]) if dep2 else None
     known2_wk = week_of(ds_, dec1["known_on"]) if dep2 else None
     dep2_wk = week_of(ds_, dep2) if dep2 else None
-    impact = f"{tot('v0', 'emerging'):.0%} → {tot('v1', 'emerging'):.0%}"
-    impact_sub = (f"new-tactic recall, before → after retraining (v1 live Week {dep_wk}) · precision "
-                  f"{prec('v0'):.1%} → {prec('v1'):.1%}")
+    if dep:
+        impact = f"{tot('v0', 'emerging'):.0%} → {tot('v1', 'emerging'):.0%}"
+        impact_sub = (f"new-tactic recall, before → after retraining (v1 live Week {dep_wk}) · precision "
+                      f"{prec('v0'):.1%} → {prec('v1'):.1%}")
+    else:
+        since = em["week_start"].min() if len(em) else None
+        r0 = tot("v0", "emerging", since) if since else float("nan")
+        impact = "No retraining yet"
+        impact_sub = ("model v0 is live" + (f" · new-tactic recall so far {r0:.0%}" if r0 == r0 else "")
+                      + (" · alert raised, waiting on approval" if a_wk else ""))
     if dep2:
         impact += f" → {tot('v2', 'emerging', dep2):.0%}"
         impact_sub = (f"new-tactic recall · v0 → v1 (live Week {dep_wk}) → v2 (live Week {dep2_wk}) · precision "
                       f"stays {min(prec('v1'), prec('v2', dep2)):.0%}+")
-    cards([("Tactic change detected?", "Yes",
-            ", ".join({"format": "payment format", "pattern": "typology mix"}[x] for x in dims) + " · control: no change",
-            ORANGE),
-           ("Week detected", f"Week {det_wk}", f"{det_wk - start_wk} weeks after the new tactics began (Week {start_wk})", None),
+    cards([("Tactic change detected?", "Yes" if det_wk else "Not yet",
+            (", ".join({"format": "payment format", "pattern": "typology mix"}[x] for x in dims) + " · control: no change")
+            if det_wk else "no lasting change after the baseline", ORANGE if det_wk else GREY),
+           ("Week detected", f"Week {det_wk}" if det_wk else "—",
+            f"{det_wk - start_wk} weeks after the new tactics began (Week {start_wk})" if det_wk and start_wk
+            else "new tactics have not started yet" if not start_wk else "waiting for a lasting change", None),
            ("Detection impact", impact, impact_sub, None)])
 
     st.subheader("Laundering payment-format mix vs baseline")
@@ -422,7 +615,11 @@ with tab_saml:
             nb_txt = (f" After v1, the data baseline moves to Weeks {nbw[0]}–{nbw[-1]} (new tactics fully in): the "
                       f"{after['week_start'].nunique()} weeks after it show "
                       + ("no lasting change." if not after["tactic_change"].any() else "a lasting change."))
-    rules = [(start_wk, f"Wk {start_wk} · new tactics start"), (det_wk, f"Wk {det_wk} · change detected")]
+    rules = []
+    if start_wk:
+        rules.append((start_wk, f"Wk {start_wk} · new tactics start"))
+    if det_wk:
+        rules.append((det_wk, f"Wk {det_wk} · change detected"))
     if a_wk:
         rules.append((a_wk, f"Wk {a_wk} · v0 falls behind (known Wk {known_wk})"))
     if dep_wk:
@@ -430,13 +627,104 @@ with tab_saml:
     if dep2:
         rules.append((a2_wk, f"Wk {a2_wk} · v1 falls behind (known Wk {known2_wk})"))
         rules.append((dep2_wk, f"Wk {dep2_wk} · v2 retrained and live"))
+    shown_to = int(lines["week"].max())
+    later = [lab for wk, lab in rules if wk > shown_to]
+    rules = [(wk, lab) for wk, lab in rules if wk <= shown_to]
     st.altair_chart(change_chart(lines[["week", "js", "series"]], thr, bands=sorted(bands), rules=rules,
                                  confirmed=fr[fr["tactic_change"]][["week", "js"]]), width="stretch")
+    if later:
+        st.info("Happened after the last week shown (its cases are not confirmed yet): " + "; ".join(later) + ".")
     st.caption(f"Week 1 = {fr['date'].min():%d %b %Y}. Each week's laundering is compared with the baseline "
                f"(Weeks {b0}–{b1}); dot = confirmed change (above the threshold {thr:.2f} two weeks in a row, "
                "honest payments unchanged). Each model is graded on confirmed cases, which arrive 4 weeks late; "
                "after every retraining the new model's own validation becomes the baseline it is checked against."
                + nb_txt)
+
+    R = pd.DataFrame(d.get("part2_rules", []))
+    if len(R):
+        R = R.assign(week=[week_of(ds_, w) for w in R["week_start"]]).sort_values("week")
+        st.subheader("Detection rules · is the live model keeping up on confirmed cases?")
+        st.caption("Unlike the chart above (a drift signal from the data), alerts come from grading the live model v0 "
+                   "on confirmed cases. A rule must hold two weeks in a row to raise an alert.")
+        ca, cb = st.columns(2, gap="large")
+        with ca:
+            st.markdown("**Weekly recall vs the model's validation baseline** (rule R1)")
+            rl = R.melt(id_vars="week", value_vars=["recall", "baseline_recall"], var_name="s", value_name="v")
+            rl["s"] = rl["s"].map({"recall": "weekly recall on confirmed cases", "baseline_recall": "validation baseline"})
+            line = alt.Chart(rl).mark_line(point=True, strokeWidth=2.5).encode(
+                x=alt.X("week:Q", title="Week", axis=alt.Axis(tickMinStep=1)),
+                y=alt.Y("v:Q", title=None, axis=alt.Axis(format="%"), scale=alt.Scale(zero=False)),
+                color=alt.Color("s:N", legend=alt.Legend(title=None, orient="top"),
+                                scale=alt.Scale(domain=["weekly recall on confirmed cases", "validation baseline"],
+                                                range=[ORANGE, GREY])),
+                strokeDash=alt.condition(alt.datum.s == "validation baseline", alt.value([6, 4]), alt.value([0])),
+                tooltip=["week", "s", alt.Tooltip("v:Q", format=".1%")])
+            st.altair_chart(line.properties(height=260), width="stretch")
+        with cb:
+            st.markdown("**Which rule held each week** (filled = rule hit, red = alert raised)")
+            hit = []
+            for _, r in R.iterrows():
+                for rule, on in (("R1 recall drop", bool(r["r1_recall_drop"])),
+                                 ("R2 new typology", bool(r["r2_new_typology"])),
+                                 ("R3 typology drop", bool(r["r3_typology_drop"]))):
+                    hit.append((int(r["week"]), rule, "alert" if on and r["alert"] else "hit" if on else "ok"))
+            hit = pd.DataFrame(hit, columns=["week", "rule", "state"])
+            strip = alt.Chart(hit).mark_rect(stroke="white", strokeWidth=2, cornerRadius=3).encode(
+                x=alt.X("week:O", title="Week"), y=alt.Y("rule:N", title=None),
+                color=alt.Color("state:N", legend=None,
+                                scale=alt.Scale(domain=["ok", "hit", "alert"], range=["#EEF0F3", ORANGE, "#C0392B"])),
+                tooltip=["week", "rule", "state"])
+            st.altair_chart(strip.properties(height=260), width="stretch")
+        src = R[R["alert"]].tail(1)
+        if src.empty:
+            src = R[R["any_rule"]].tail(1)
+        rows = []
+        for _, r in src.iterrows():
+            for kind, col in (("new typology (R2)", "r2_new_typology"), ("typology drop (R3)", "r3_typology_drop")):
+                for item in filter(None, [x.strip() for x in str(r[col] or "").split(";")]):
+                    name, frac = item.rsplit(" ", 1)
+                    caught, cases = (int(x) for x in frac.split("/"))
+                    rows.append((name.replace("_", " "), kind, caught, cases - caught, cases))
+        if rows:
+            wk_ = int(src["week"].iloc[0])
+            st.markdown(f"**Typologies behind the rule · Week {wk_}**")
+            ty = pd.DataFrame(rows, columns=["typology", "rule", "caught", "missed", "cases"]) \
+                .melt(id_vars=["typology", "rule", "cases"], value_vars=["caught", "missed"], var_name="outcome",
+                      value_name="n")
+            order = list(ty.groupby("typology")["cases"].first().sort_values(ascending=False).index)
+            tb = alt.Chart(ty).mark_bar(size=28).encode(
+                y=alt.Y("typology:N", title=None, sort=order), x=alt.X("n:Q", title="confirmed cases"),
+                color=alt.Color("outcome:N", legend=alt.Legend(title=None, orient="top"),
+                                scale=alt.Scale(domain=["caught", "missed"], range=[BLUE, ORANGE])),
+                tooltip=["typology", "rule", "outcome", "n", "cases"])
+            st.altair_chart(tb.properties(height=max(90, 55 * ty["typology"].nunique())), width="stretch")
+            st.caption("The model never saw these typologies in validation, so it has no baseline for them. "
+                       "Caught = flagged by v0; missed = laundering it let through.")
+
+    if dep and "v1" in set(W2["version"]):
+        st.subheader("Old vs new model · weekly recall on confirmed cases")
+        cols = st.columns(2, gap="large")
+        for col, (grp, ttl) in zip(cols, (("all", "All laundering"), ("emerging", "New tactics only"))):
+            ww = W2[(W2["group"] == grp) & (W2["cases"] > 0)]
+            ww = ww[(ww["version"] == "v0") | (ww["week_start"] >= dep)]
+            ww = ww[ww["version"].isin(["v0", "v1"] + (["v2"] if dep2 else []))].copy()
+            ww["week"] = [week_of(ds_, w) for w in ww["week_start"]]
+            ww["model"] = ww["version"].map({"v0": "v0 (before retraining)", "v1": "v1 (after retraining)",
+                                             "v2": "v2 (after 2nd retraining)"})
+            with col:
+                st.markdown(f"**{ttl}**")
+                ch = alt.Chart(ww).mark_line(point=True, strokeWidth=2.5).encode(
+                    x=alt.X("week:Q", title="Week", axis=alt.Axis(tickMinStep=1)),
+                    y=alt.Y("recall:Q", title=None, axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
+                    color=alt.Color("model:N", legend=alt.Legend(title=None, orient="top"),
+                                    scale=alt.Scale(domain=["v0 (before retraining)", "v1 (after retraining)",
+                                                            "v2 (after 2nd retraining)"],
+                                                    range=[ORANGE, BLUE, "#1B9E77"])),
+                    tooltip=["week", "model", "cases", "caught", alt.Tooltip("recall:Q", format=".1%")])
+                vr = alt.Chart(pd.DataFrame({"week": [dep_wk]})).mark_rule(strokeDash=[4, 4], color=GREY).encode(x="week:Q")
+                st.altair_chart((ch + vr).properties(height=260), width="stretch")
+        st.caption("v1 is shown only from its go-live week, because it was trained on earlier cases. The dashed line "
+                   "marks when v1 went live; both models are graded on the same confirmed cases.")
 
     def round_bars(old, new, frm, title, la, lb):
         st.subheader(title)

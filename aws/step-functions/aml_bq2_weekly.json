@@ -1,0 +1,481 @@
+{
+ "Comment": "AML BQ2 weekly run for SAML-R: one simulated week per execution",
+ "StartAt": "HasWeek",
+ "States": {
+  "HasWeek": {
+   "Type": "Choice",
+   "Choices": [
+    {
+     "Variable": "$.week_index",
+     "IsPresent": true,
+     "Next": "InRange?"
+    }
+   ],
+   "Default": "ReadPointer"
+  },
+  "ReadPointer": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+   "Parameters": {
+    "Bucket": "is459-g1t4-aml",
+    "Key": "progress/bq2_weekly.json"
+   },
+   "ResultSelector": {
+    "v.$": "States.StringToJson($.Body)"
+   },
+   "ResultPath": "$.ptr",
+   "Next": "UsePointer",
+   "Catch": [
+    {
+     "ErrorEquals": [
+      "States.ALL"
+     ],
+     "ResultPath": null,
+     "Next": "StartAtZero"
+    }
+   ]
+  },
+  "UsePointer": {
+   "Type": "Pass",
+   "Parameters": {
+    "week_index.$": "$.ptr.v.week_index"
+   },
+   "Next": "InRange?"
+  },
+  "StartAtZero": {
+   "Type": "Pass",
+   "Parameters": {
+    "week_index": 0
+   },
+   "Next": "InRange?"
+  },
+  "InRange?": {
+   "Type": "Choice",
+   "Choices": [
+    {
+     "Variable": "$.week_index",
+     "NumericGreaterThanEquals": 29,
+     "Next": "DataEnded"
+    }
+   ],
+   "Default": "AddCalendar"
+  },
+  "DataEnded": {
+   "Type": "Succeed",
+   "Comment": "no weeks left in the data"
+  },
+  "AddCalendar": {
+   "Type": "Pass",
+   "Result": {
+    "starts": [
+     "2023-01-30",
+     "2023-02-06",
+     "2023-02-13",
+     "2023-02-20",
+     "2023-02-27",
+     "2023-03-06",
+     "2023-03-13",
+     "2023-03-20",
+     "2023-03-27",
+     "2023-04-03",
+     "2023-04-10",
+     "2023-04-17",
+     "2023-04-24",
+     "2023-05-01",
+     "2023-05-08",
+     "2023-05-15",
+     "2023-05-22",
+     "2023-05-29",
+     "2023-06-05",
+     "2023-06-12",
+     "2023-06-19",
+     "2023-06-26",
+     "2023-07-03",
+     "2023-07-10",
+     "2023-07-17",
+     "2023-07-24",
+     "2023-07-31",
+     "2023-08-07",
+     "2023-08-14"
+    ],
+    "ends": [
+     "2023-02-05",
+     "2023-02-12",
+     "2023-02-19",
+     "2023-02-26",
+     "2023-03-05",
+     "2023-03-12",
+     "2023-03-19",
+     "2023-03-26",
+     "2023-04-02",
+     "2023-04-09",
+     "2023-04-16",
+     "2023-04-23",
+     "2023-04-30",
+     "2023-05-07",
+     "2023-05-14",
+     "2023-05-21",
+     "2023-05-28",
+     "2023-06-04",
+     "2023-06-11",
+     "2023-06-18",
+     "2023-06-25",
+     "2023-07-02",
+     "2023-07-09",
+     "2023-07-16",
+     "2023-07-23",
+     "2023-07-30",
+     "2023-08-06",
+     "2023-08-13",
+     "2023-08-20"
+    ]
+   },
+   "ResultPath": "$.cal",
+   "Next": "Calendar"
+  },
+  "Calendar": {
+   "Type": "Pass",
+   "Parameters": {
+    "dataset": "SAML-R",
+    "week_index.$": "$.week_index",
+    "week_start.$": "States.ArrayGetItem($.cal.starts, $.week_index)",
+    "week_end.$": "States.ArrayGetItem($.cal.ends, $.week_index)"
+   },
+   "Next": "Weekly"
+  },
+  "Weekly": {
+   "Type": "Parallel",
+   "ResultPath": null,
+   "Next": "ReadDecision",
+   "Branches": [
+    {
+     "StartAt": "Part1",
+     "States": {
+      "Part1": {
+       "Type": "Task",
+       "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+       "Parameters": {
+        "ApplicationId": "00ga27nqsrmqmp09",
+        "ClientToken.$": "States.UUID()",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "bq2-part1-SAML-R",
+        "ExecutionTimeoutMinutes": 45,
+        "JobDriver": {
+         "SparkSubmit": {
+          "EntryPoint": "s3://is459-g1t4-aml/jobs/bq2_part1_tactics_spark.py",
+          "SparkSubmitParameters": "--py-files s3://is459-g1t4-aml/jobs/jobs.zip --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.driver.cores=4 --conf spark.driver.memory=12g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3",
+          "EntryPointArguments": [
+           "SAML-R",
+           "2022-10-03",
+           "2023-01-29"
+          ]
+         }
+        },
+        "ConfigurationOverrides": {
+         "MonitoringConfiguration": {
+          "S3MonitoringConfiguration": {
+           "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+          }
+         }
+        }
+       },
+       "ResultPath": null,
+       "End": true
+      }
+     }
+    },
+    {
+     "StartAt": "ScoreDeployed",
+     "States": {
+      "ScoreDeployed": {
+       "Type": "Task",
+       "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+       "Parameters": {
+        "ApplicationId": "00ga27nqsrmqmp09",
+        "ClientToken.$": "States.UUID()",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "bq2-score",
+        "ExecutionTimeoutMinutes": 45,
+        "JobDriver": {
+         "SparkSubmit": {
+          "EntryPoint": "s3://is459-g1t4-aml/jobs/bq2_part2_score.py",
+          "SparkSubmitParameters": "--py-files s3://is459-g1t4-aml/jobs/jobs.zip --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.driver.cores=4 --conf spark.driver.memory=12g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=1 --conf spark.executor.memory=2g --conf spark.executor.instances=1 --conf spark.dynamicAllocation.initialExecutors=1 --conf spark.dynamicAllocation.maxExecutors=1",
+          "EntryPointArguments.$": "States.Array($.dataset, 'deployed', '-', $.week_end)"
+         }
+        },
+        "ConfigurationOverrides": {
+         "MonitoringConfiguration": {
+          "S3MonitoringConfiguration": {
+           "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+          }
+         }
+        }
+       },
+       "ResultPath": null,
+       "Next": "EvalDeployed"
+      },
+      "EvalDeployed": {
+       "Type": "Task",
+       "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+       "Parameters": {
+        "ApplicationId": "00ga27nqsrmqmp09",
+        "ClientToken.$": "States.UUID()",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "bq2-eval",
+        "ExecutionTimeoutMinutes": 45,
+        "JobDriver": {
+         "SparkSubmit": {
+          "EntryPoint": "s3://is459-g1t4-aml/jobs/bq2_part2_eval.py",
+          "SparkSubmitParameters": "--py-files s3://is459-g1t4-aml/jobs/jobs.zip --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.driver.cores=4 --conf spark.driver.memory=12g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=1 --conf spark.executor.memory=2g --conf spark.executor.instances=1 --conf spark.dynamicAllocation.initialExecutors=1 --conf spark.dynamicAllocation.maxExecutors=1",
+          "EntryPointArguments.$": "States.Array($.dataset, 'deployed', '--as-of', $.week_end)"
+         }
+        },
+        "ConfigurationOverrides": {
+         "MonitoringConfiguration": {
+          "S3MonitoringConfiguration": {
+           "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+          }
+         }
+        }
+       },
+       "ResultPath": null,
+       "End": true
+      }
+     }
+    }
+   ]
+  },
+  "ReadDecision": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+   "Parameters": {
+    "Bucket": "is459-g1t4-aml",
+    "Key": "models/bq2r/SAML-R/decision_latest.json"
+   },
+   "ResultSelector": {
+    "v.$": "States.StringToJson($.Body)"
+   },
+   "ResultPath": "$.decision",
+   "Next": "Alert?"
+  },
+  "Alert?": {
+   "Type": "Choice",
+   "Choices": [
+    {
+     "Variable": "$.decision.v.alert",
+     "BooleanEquals": true,
+     "Next": "NotifyRetrain"
+    }
+   ],
+   "Default": "Advance"
+  },
+  "NotifyRetrain": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::sns:publish",
+   "Parameters": {
+    "TopicArn": "arn:aws:sns:us-east-1:390402569482:aml-bq2-alerts",
+    "Subject": "AML BQ2: retrain approval needed",
+    "Message.$": "States.Format('Detection alert for {} (week ending {}). Open the dashboard to approve or reject retraining.', $.dataset, $.week_end)"
+   },
+   "ResultPath": null,
+   "Next": "WaitRetrain"
+  },
+  "WaitRetrain": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+   "Parameters": {
+    "QueueUrl": "https://sqs.us-east-1.amazonaws.com/390402569482/aml-bq2-approvals",
+    "MessageBody": {
+     "token.$": "$$.Task.Token",
+     "gate": "retrain_gate",
+     "dataset": "SAML-R",
+     "week_end.$": "$.week_end",
+     "decision.$": "$.decision.v",
+     "message": "Approve retraining?"
+    }
+   },
+   "TimeoutSeconds": 604800,
+   "ResultPath": "$.retrain_gate",
+   "Catch": [
+    {
+     "ErrorEquals": [
+      "States.ALL"
+     ],
+     "ResultPath": "$.rejected",
+     "Next": "Rejected"
+    }
+   ],
+   "Next": "TrainChallenger"
+  },
+  "TrainChallenger": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+   "Parameters": {
+    "ApplicationId": "00ga27nqsrmqmp09",
+    "ClientToken.$": "States.UUID()",
+    "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+    "Name": "bq2-train",
+    "ExecutionTimeoutMinutes": 45,
+    "JobDriver": {
+     "SparkSubmit": {
+      "EntryPoint": "s3://is459-g1t4-aml/jobs/bq2_part2_train.py",
+      "SparkSubmitParameters": "--py-files s3://is459-g1t4-aml/jobs/jobs.zip --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.driver.cores=4 --conf spark.driver.memory=12g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=1 --conf spark.executor.memory=2g --conf spark.executor.instances=1 --conf spark.dynamicAllocation.initialExecutors=1 --conf spark.dynamicAllocation.maxExecutors=1",
+      "EntryPointArguments.$": "States.Array($.dataset, $.decision.v.retrain, $.decision.v.retrain_to)"
+     }
+    },
+    "ConfigurationOverrides": {
+     "MonitoringConfiguration": {
+      "S3MonitoringConfiguration": {
+       "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+      }
+     }
+    }
+   },
+   "ResultPath": null,
+   "Next": "ScoreChallenger"
+  },
+  "ScoreChallenger": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+   "Parameters": {
+    "ApplicationId": "00ga27nqsrmqmp09",
+    "ClientToken.$": "States.UUID()",
+    "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+    "Name": "bq2-score-challenger",
+    "ExecutionTimeoutMinutes": 45,
+    "JobDriver": {
+     "SparkSubmit": {
+      "EntryPoint": "s3://is459-g1t4-aml/jobs/bq2_part2_score.py",
+      "SparkSubmitParameters": "--py-files s3://is459-g1t4-aml/jobs/jobs.zip --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.driver.cores=4 --conf spark.driver.memory=12g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=1 --conf spark.executor.memory=2g --conf spark.executor.instances=1 --conf spark.dynamicAllocation.initialExecutors=1 --conf spark.dynamicAllocation.maxExecutors=1",
+      "EntryPointArguments.$": "States.Array($.dataset, $.decision.v.retrain, '-', $.week_end)"
+     }
+    },
+    "ConfigurationOverrides": {
+     "MonitoringConfiguration": {
+      "S3MonitoringConfiguration": {
+       "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+      }
+     }
+    }
+   },
+   "ResultPath": null,
+   "Next": "EvalChallenger"
+  },
+  "EvalChallenger": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+   "Parameters": {
+    "ApplicationId": "00ga27nqsrmqmp09",
+    "ClientToken.$": "States.UUID()",
+    "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+    "Name": "bq2-eval-challenger",
+    "ExecutionTimeoutMinutes": 45,
+    "JobDriver": {
+     "SparkSubmit": {
+      "EntryPoint": "s3://is459-g1t4-aml/jobs/bq2_part2_eval.py",
+      "SparkSubmitParameters": "--py-files s3://is459-g1t4-aml/jobs/jobs.zip --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.driver.cores=4 --conf spark.driver.memory=12g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=1 --conf spark.executor.memory=2g --conf spark.executor.instances=1 --conf spark.dynamicAllocation.initialExecutors=1 --conf spark.dynamicAllocation.maxExecutors=1",
+      "EntryPointArguments.$": "States.Array($.dataset, 'deployed', '--as-of', $.week_end)"
+     }
+    },
+    "ConfigurationOverrides": {
+     "MonitoringConfiguration": {
+      "S3MonitoringConfiguration": {
+       "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+      }
+     }
+    }
+   },
+   "ResultPath": null,
+   "Next": "NotifyDeploy"
+  },
+  "NotifyDeploy": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::sns:publish",
+   "Parameters": {
+    "TopicArn": "arn:aws:sns:us-east-1:390402569482:aml-bq2-alerts",
+    "Subject": "AML BQ2: deploy approval needed",
+    "Message.$": "States.Format('Challenger model for {} is trained (week ending {}). Review it on the dashboard and approve or reject deployment.', $.dataset, $.week_end)"
+   },
+   "ResultPath": null,
+   "Next": "WaitDeploy"
+  },
+  "WaitDeploy": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+   "Parameters": {
+    "QueueUrl": "https://sqs.us-east-1.amazonaws.com/390402569482/aml-bq2-approvals",
+    "MessageBody": {
+     "token.$": "$$.Task.Token",
+     "gate": "deploy_gate",
+     "dataset": "SAML-R",
+     "week_end.$": "$.week_end",
+     "decision.$": "$.decision.v",
+     "message": "Approve deploying the challenger?"
+    }
+   },
+   "TimeoutSeconds": 604800,
+   "ResultPath": "$.deploy_gate",
+   "Catch": [
+    {
+     "ErrorEquals": [
+      "States.ALL"
+     ],
+     "ResultPath": "$.rejected",
+     "Next": "Rejected"
+    }
+   ],
+   "Next": "Deploy"
+  },
+  "Deploy": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+   "Parameters": {
+    "ApplicationId": "00ga27nqsrmqmp09",
+    "ClientToken.$": "States.UUID()",
+    "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+    "Name": "bq2-deploy",
+    "ExecutionTimeoutMinutes": 45,
+    "JobDriver": {
+     "SparkSubmit": {
+      "EntryPoint": "s3://is459-g1t4-aml/jobs/bq2_deploy.py",
+      "SparkSubmitParameters": "--py-files s3://is459-g1t4-aml/jobs/jobs.zip --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.driver.cores=4 --conf spark.driver.memory=12g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=1 --conf spark.executor.memory=2g --conf spark.executor.instances=1 --conf spark.dynamicAllocation.initialExecutors=1 --conf spark.dynamicAllocation.maxExecutors=1",
+      "EntryPointArguments.$": "States.Array($.dataset, $.decision.v.retrain, $.deploy_gate.approved_by, $.decision.v.deploy_from)"
+     }
+    },
+    "ConfigurationOverrides": {
+     "MonitoringConfiguration": {
+      "S3MonitoringConfiguration": {
+       "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+      }
+     }
+    }
+   },
+   "ResultPath": null,
+   "Next": "Advance"
+  },
+  "Rejected": {
+   "Type": "Pass",
+   "Comment": "a person rejected, or the 7-day approval window passed",
+   "Next": "Advance"
+  },
+  "Advance": {
+   "Type": "Pass",
+   "Parameters": {
+    "week_index.$": "States.MathAdd($.week_index, 1)"
+   },
+   "ResultPath": "$.next",
+   "Next": "SavePointer"
+  },
+  "SavePointer": {
+   "Type": "Task",
+   "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+   "Parameters": {
+    "Bucket": "is459-g1t4-aml",
+    "Key": "progress/bq2_weekly.json",
+    "Body.$": "States.JsonToString($.next)"
+   },
+   "ResultPath": null,
+   "End": true
+  }
+ }
+}
