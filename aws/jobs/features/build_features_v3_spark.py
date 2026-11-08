@@ -131,9 +131,12 @@ def load_accounts():
 
 def main():
     tx = spark.read.parquet(f"{CURATED}/transactions").filter(F.col("dataset") == DATASET)
-    med = tx.groupBy("payment_currency").agg(
+    med_base = tx           # median per currency: a chunk uses only payments up to its last day
+    if CHUNK_TO:
+        med_base = med_base.filter(F.col("txn_date") <= F.lit(CHUNK_TO).cast("date"))
+    med = med_base.groupBy("payment_currency").agg(
         F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
-    medr = tx.groupBy("receiving_currency").agg(
+    medr = med_base.groupBy("receiving_currency").agg(
         F.expr("percentile_approx(amount_received, 0.5)").cast("double").alias("med_recv"))
     if CHUNK_FROM:
         tx = tx.filter((F.col("txn_date") >= F.date_sub(F.lit(CHUNK_FROM).cast("date"), LOOKBACK_DAYS))

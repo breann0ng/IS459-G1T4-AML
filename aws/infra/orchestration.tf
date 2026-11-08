@@ -5,13 +5,56 @@
 # was built in the console and is not managed here yet; import it once its definition is in
 # aws/step-functions/ (see aws/step-functions/README.md).
 
-data "aws_caller_identity" "me" {}
+# data.aws_caller_identity.me is declared in bq2_weekly.tf (one per module)
 
 locals {
   account_id   = data.aws_caller_identity.me.account_id
   bq1_sm_name  = "aml_bq1_weekly"
-  emr_app_arn  = "arn:aws:emr-serverless:${var.region}:${local.account_id}:/applications/${aws_emrserverless_application.jobs.id}"
+  emr_app_arn  = aws_emrserverless_application.bq1.arn
   bq1_log_keys = "arn:aws:s3:::${var.bucket}/progress/bq1_weekly/*"
+}
+
+# ---------------------------------------------------------------- BQ1's own EMR Serverless app
+# BQ1 runs on its own application so it never waits behind BQ2 or ad-hoc runs on the shared
+# aml-jobs app (on 2026-11-07 a week's clean starved for 20 min while another job held all 16 vCPU).
+# One job at a time, because one BQ1 job (driver 4 + 3 executors x 4) can use the whole 16 vCPU:
+# the next step waits in EMR's own queue (QUEUED, not billed) instead of starting and starving.
+# Idle costs nothing (auto-stop). Account quota: 64 vCPU, so aml-jobs (16) + aml-bq1 (16) fit.
+# Same settings as aml-jobs otherwise (Glue Data Catalog metastore, persistent UI, cost per job).
+resource "aws_emrserverless_application" "bq1" {
+  name          = "aml-bq1"
+  release_label = var.emr_release_label
+  type          = "spark"
+  architecture  = "X86_64"
+
+  auto_start_configuration { enabled = true }
+  auto_stop_configuration {
+    enabled              = true
+    idle_timeout_minutes = 15
+  }
+
+  maximum_capacity { # the auto-scaling ceiling AND the cost cap
+    cpu    = "16 vCPU"
+    memory = "64 GB"
+  }
+
+  scheduler_configuration {
+    max_concurrent_runs   = 1
+    queue_timeout_minutes = 120
+  }
+
+  runtime_configuration {
+    classification = "spark-defaults"
+    properties = {
+      "spark.hadoop.hive.metastore.client.factory.class" = "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+    }
+  }
+
+  monitoring_configuration {
+    managed_persistence_monitoring_configuration { enabled = true }
+  }
+
+  job_level_cost_allocation_configuration { enabled = true }
 }
 
 # ---------------------------------------------------------------- S3 -> EventBridge
@@ -78,7 +121,7 @@ resource "aws_iam_role_policy" "sfn_bq1" {
         Effect    = "Allow"
         Action    = "s3:ListBucket"
         Resource  = aws_s3_bucket.lake.arn
-        Condition = { StringLike = { "s3:prefix" = ["progress/bq1_weekly/*", "models/final/"] } } # + CheckModel
+        Condition = { StringLike = { "s3:prefix" = ["progress/bq1_weekly/*", "models/*"] } } # + CheckModel
       },
       {
         Sid    = "Logs" # vended-log delivery; these actions do not support resource scoping
@@ -97,7 +140,7 @@ resource "aws_sfn_state_machine" "bq1_weekly" {
   type     = "STANDARD" # .sync waits on EMR jobs: Express does not support it
   definition = templatefile("${path.module}/../step-functions/aml_bq1_weekly.asl.json", {
     bucket         = var.bucket
-    application_id = aws_emrserverless_application.jobs.id
+    application_id = aws_emrserverless_application.bq1.id
     job_role_arn   = aws_iam_role.emr_job.arn
   })
 
