@@ -7,11 +7,11 @@ and EMR apps written in. Edit the JSON here, then redeploy it with the command a
 | File | State machine | Status (8 Nov 2026) |
 |---|---|---|
 | `aml_prepare.asl.json` | `aml_prepare` | **Live**, identical to AWS. SAML-R/SAML-C input tested (route + clean) |
-| `aml_bq1_train.asl.json` | `aml_bq1_train` | **Live**, identical to AWS. Last run promoted `bq1-20261108-1332` |
-| `aml_bq1_score.asl.json` | `aml_bq1_score` | **Live**, identical to AWS |
+| `aml_bq1_train.asl.json` | `aml_bq1_train` | **Live**, identical to AWS. Last run promoted `bq1-20261108-1332`; rolled back on 9 Nov to `bq1` (better on HI-Large-live 2022-09-26: account-day precision 0.571 vs 0.478, F1 0.550 vs 0.504, same recall). Old pointer: `s3://is459-g1t4-aml/backup/champion/` |
+| `aml_bq1_score.asl.json` | `aml_bq1_score` | **Live**, identical to AWS. Tested end to end on HI-Large-live 2022-09-26 (9 Nov): score 10.5 min, name 4 min, check + summary 3.5 min |
 | `aml_bq2_weekly.asl.json` | `aml_bq2_weekly` | **Not deployed yet.** Same as AWS except the 9 feature states are replaced by one `PrepareData` call to `aml_prepare`. Needs `iam/aml_sfn_bq2_prepare_policy.json` on role `aml-sfn-bq2` first |
 | `aml_bq2_weekly_ibm.asl.json` | `aml_bq2_weekly_ibm` | **Not deployed yet.** Same as AWS except the code path is the shared `jobs/` instead of the `bq2_ibm/jobs/` copy |
-| `legacy/aml_bq1_weekly.asl.json` | `aml_bq1_weekly` | Live and managed by Terraform (`aws/infra/orchestration.tf`); the S3 rule `aml-bq1-weekly-file` still starts it. Replaced by `aml_prepare` + `aml_bq1_score` once the rules below are switched |
+| `legacy/aml_bq1_weekly.asl.json` | `aml_bq1_weekly` | Live and managed by Terraform (`aws/infra/orchestration.tf`), but no longer started: its S3 rule `aml-bq1-weekly-file` is disabled. Replaced by `aml_prepare` + `aml_bq1_score` (rules below) |
 
 Both "not deployed" files pass `ValidateStateMachineDefinition`. Neither has been run. Deploy them
 together with the BQ2 team and test `aml_bq2_weekly` on one SAML week first.
@@ -28,7 +28,11 @@ together with the BQ2 team and test `aml_bq2_weekly` on one SAML week first.
     1. `raw/transactions/set=<dataset>/week=<Monday>/_SUCCESS` -> `aml_prepare` (which emits `DataPrepared`).
     2. `DataPrepared` for a `*-live` dataset -> `aml_bq1_score`.
 
-## Switching the weekly trigger to the new flow (not done yet)
+## Switching the weekly trigger to the new flow (done, 9 Nov 2026)
+
+Live: `aml-prepare-weekly-file` and `aml-bq1-data-prepared` are enabled, the legacy `aml-bq1-weekly-file`
+is disabled. S3-started runs use the code in `s3://is459-g1t4-aml/jobs/` (the event carries no
+`code_prefix`), so `jobs/` must hold `main`'s code. These were the commands:
 
 ```bash
 aws events put-rule --name aml-prepare-weekly-file --event-pattern file://aws/step-functions/inputs/eventbridge/rule_weekly_file.json
