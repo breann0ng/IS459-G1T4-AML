@@ -3,6 +3,11 @@ final_report.py
 Collect the final HI-Large results from S3 into one small file for the BQ1 dashboard.
 Laptop is fine (small tables only):
     python final_report.py HI-Large > final_report.txt      (also writes dashboard_data.json)
+
+Weekly pipeline (Step Functions aml_bq1_weekly writes analytics/live_*, one run_date partition per week):
+    AML_LIVE=1 python final_report.py HI-Large-live          (writes dashboard_data_live_HI-Large-live.json)
+Every finished week is merged: counts are added up and rates recomputed (never averaged), so rerunning
+after each new week keeps the dashboard current.
 """
 
 import json
@@ -16,11 +21,58 @@ import txn_report as R
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Large"
 RUN = os.environ.get("AML_FINAL_RUN", "final")     # a named final run: export AML_FINAL_RUN=<name> first
+LIVE = bool(os.environ.get("AML_LIVE"))            # the weekly pipeline's live_* tables, all finished weeks
 
 
 def tbl(name):
-    t = R.load(name if RUN == "final" else f"final_{RUN}_{name[len('final_'):]}")
+    if LIVE:
+        t = R.load(f"live_{name[len('final_'):]}")
+    else:
+        t = R.load(name if RUN == "final" else f"final_{RUN}_{name[len('final_'):]}")
     return t[t["dataset"] == DATASET].copy() if not t.empty and "dataset" in t else t
+
+
+def prf(tp, alerts, pos):
+    p = tp / alerts if alerts else np.nan
+    r = tp / pos if pos else np.nan
+    return p, r, (2 * p * r / (p + r) if p and r and p + r else np.nan)
+
+
+def merge_weeks(res, budget, pats, st2, sch, named, daily):
+    """One row per week -> one row for all weeks: add the counts, then recompute every rate."""
+    weeks = sorted(res["run_date"].astype(str).unique())
+    pats = (pats.groupby(["level", "pattern_label"], as_index=False)[["positives", "caught", "caught_used"]].sum()
+                .assign(dataset=DATASET))
+    first = res.sort_values("run_date").groupby(["level", "cutoff"], as_index=False).first()
+    summed = res.groupby(["level", "cutoff"], as_index=False)[["alerts", "true_alerts", "positives", "days", "payments"]].sum()
+    out = first.drop(columns=["alerts", "true_alerts", "positives", "days", "payments"]).merge(summed, on=["level", "cutoff"])
+    out[["precision", "recall", "f1"]] = [prf(r.true_alerts, r.alerts, r.positives) for r in out.itertuples()]
+    out["alerts_per_day"] = out["alerts"] / out["days"]
+    w = res.assign(wpos=res["positives"] * res["pr_auc"]).groupby(["level", "cutoff"])[["wpos", "positives"]].sum(min_count=1)
+    out["pr_auc"] = out.set_index(["level", "cutoff"]).index.map(lambda k: w.loc[k, "wpos"] / w.loc[k, "positives"]
+                                                                 if w.loc[k, "wpos"] == w.loc[k, "wpos"] else np.nan)
+    out["date_from"], out["date_to"] = res["date_from"].astype(str).min(), res["date_to"].astype(str).max()
+    for lvl in out["level"].unique():                      # pattern / unclassified recall from the merged per-pattern counts
+        p = pats[pats["level"] == lvl]
+        named_p, unc = p[p["pattern_label"] != "unclassified"], p[p["pattern_label"] == "unclassified"]
+        m = (out["level"] == lvl) & out["recall_patterns"].notna()
+        out.loc[m, "recall_patterns"] = named_p["caught"].sum() / named_p["positives"].sum()
+        out.loc[m, "recall_unclassified"] = unc["caught"].sum() / max(unc["positives"].sum(), 1)
+    fz = out[out["cutoff"] == "frozen_threshold"].set_index("level")["positives"]
+    budget = budget.groupby(["level", "k_per_day"], as_index=False)[["alerts", "true_alerts"]].sum().assign(dataset=DATASET)
+    budget[["precision", "recall", "f1"]] = [prf(r.true_alerts, r.alerts, fz.get(r.level, np.nan)) for r in budget.itertuples()]
+    if not st2.empty:
+        keep = [c for c in ["config"] if c in st2]
+        body = st2[~st2["pattern"].str.startswith("MACRO")]
+        g = body.groupby(["pattern", "mode", *keep], as_index=False)[["true_cases", "named_as", "correct"]].sum()
+        g[["precision", "recall", "f1"]] = [prf(r.correct, r.named_as, r.true_cases) for r in g.itertuples()]
+        macro = (g[g["pattern"] != "unclassified"].groupby(["mode", *keep], as_index=False)
+                  [["true_cases", "named_as", "correct", "precision", "recall", "f1"]]
+                  .agg({"true_cases": "sum", "named_as": "sum", "correct": "sum", "precision": "mean", "recall": "mean",
+                        "f1": "mean"}).assign(pattern="MACRO (7 patterns)"))
+        st2 = pd.concat([g, macro], ignore_index=True).assign(dataset=DATASET, run_at=str(st2["run_at"].max()))
+    sch = sch.drop_duplicates("scheme_id")
+    return out, budget, pats, st2, sch, named, daily.sort_values(["level", "date"]), weeks
 
 
 def clean(df):
@@ -40,6 +92,10 @@ def main():
     named = tbl("final_alerts_named")
     if res.empty:
         raise SystemExit("No analytics/final_results yet: run score_final_spark.py first.")
+    weeks = []
+    if LIVE:
+        res, budget, pats, st2, sch, named, daily, weeks = merge_weeks(res, budget, pats, st2, sch, named, daily)
+        print(f"=== live: {len(weeks)} finished weeks merged: {', '.join(weeks)}")
 
     print(f"=== {DATASET} · STAGE 1 (frozen threshold {res['threshold'].dropna().iloc[0]:.4f})")
     print(res[["level", "cutoff", "alerts", "true_alerts", "positives", "precision", "recall", "f1",
@@ -129,8 +185,10 @@ def main():
                                              .rename("schemes").reset_index().assign(bucket=lambda d: d.iloc[:, 0].astype(str)))[["bucket", "schemes"]]),
            "stage2": clean(st2) if not st2.empty else [], "confusion": conf, "example_groups": examples,
            "alerts_by_predicted_pattern": alerts_by_pred,
-           "schemes": per_scheme, "top2": top2, "alert_examples": alert_examples, "queues": queues}
-    out_file = "dashboard_data.json" if RUN == "final" else f"dashboard_data_{RUN}.json"
+           "schemes": per_scheme, "top2": top2, "alert_examples": alert_examples, "queues": queues,
+           "source": "weekly pipeline (aml_bq1_weekly)" if LIVE else "one-off run", "weeks": weeks}
+    out_file = (f"dashboard_data_live_{DATASET}.json" if LIVE
+                else "dashboard_data.json" if RUN == "final" else f"dashboard_data_{RUN}.json")
     with open(out_file, "w") as f:
         json.dump(out, f, indent=1, default=str)
     print(f"\nwrote {out_file} (run {RUN})")

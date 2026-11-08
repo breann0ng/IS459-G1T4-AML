@@ -5,6 +5,66 @@
 
 Details and results: [`docs/bq1.md`](docs/bq1.md) · [`docs/bq2.md`](docs/bq2.md).
 
+## Try the dashboards yourself (about 5 minutes, no AWS account needed)
+
+The dashboards read small result files that are already in this repository (`app/data/`), so they run on any laptop.
+You need **Python 3.10 or newer** and **Git**.
+
+**1. Get the code** (the BQ1 dashboard lives on the `enrui-ui-nav` branch):
+
+```bash
+git clone -b enrui-ui-nav https://github.com/breann0ng/IS459-G1T4-AML.git
+cd IS459-G1T4-AML
+```
+
+**2. Install the packages** into a fresh environment:
+
+| Windows (PowerShell) | macOS / Linux |
+|---|---|
+| `python -m venv .venv` | `python3 -m venv .venv` |
+| `.venv\Scripts\activate` | `source .venv/bin/activate` |
+| `pip install -r app/requirements.txt` | `pip install -r app/requirements.txt` |
+
+**3. Start a dashboard.** Run it from inside the `app` folder, so the dark theme and text sizes in
+`app/.streamlit/config.toml` are picked up:
+
+```bash
+cd app
+streamlit run bq1_site.py                      # BQ1: Overview + BQ1 · Early detection (opens http://localhost:8501)
+streamlit run app_bq2.py --server.port 8502    # BQ2: tactic change & detection (opens http://localhost:8502)
+```
+
+Each command opens the dashboard in your browser. Stop it with **Ctrl+C** in the terminal. Both can run at the same
+time in two terminals (hence the different ports).
+
+**What to look at**
+
+- **BQ1** (`bq1_site.py`): the **Overview** page states both business questions with their answers and the pipeline.
+  The **BQ1 · Early detection** page has four tabs: *Alerts & accuracy* (drag the slider to set how many alerts a day
+  the team can review), *Speed* (pick a pattern and when a scheme counts as detected), *Who checks what* and
+  *Archived findings*. Every chart has a **Takeaway** and a **How to read this, and why it matters** box; hover any
+  **(?)** to see how a number is calculated.
+- **BQ2** (`app_bq2.py`): two tabs, *HI-Large · IBM AML* and *SAML-D · new tactics test*.
+
+If `streamlit` is "not recognised", the environment is not active: repeat the `activate` line from step 2.
+
+### Updating the BQ1 results as the weekly pipeline finishes more weeks (team only, needs AWS)
+
+The BQ1 page reads `app/data/dashboard_data_live_HI-Large-live.json`: every HI-Large week that the Step Functions
+pipeline `aml_bq1_weekly` has finished, merged (counts added up, rates recomputed). After a new week finishes
+(`progress/bq1_weekly/HI-Large-live/<week>.json` says `SUCCEEDED`), refresh it from the repository root (PowerShell):
+
+```powershell
+$env:AWS_PROFILE = "g1t4"; $env:AML_ROOT = "s3://is459-g1t4-aml"; $env:AML_LIVE = "1"
+cd local\reports
+..\..\.venv\Scripts\python final_report.py HI-Large-live > ..\..\results\final\final_report_live.txt
+Move-Item -Force dashboard_data_live_HI-Large-live.json ..\..\app\data\
+cd ..\..
+```
+
+Then commit the JSON. Scheme timings on the Speed tab stay from the one-off run of 12–25 Sep, because the weekly
+pipeline cuts schemes at the week boundary. If the live file is missing, the page falls back to the one-off run.
+
 ## Repository layout: grouped by where things run
 
 ```
@@ -21,7 +81,7 @@ aws/                      ★ DEPLOYED TO AWS
   infra/                    Terraform (to write)
   config/pipeline.yaml      bucket, region, final model settings: the single source of truth
   deploy/                   deploy.sh · build_venv.sh · requirements-jobs.txt
-app/                      ★ DEPLOYED TO STREAMLIT CLOUD: app_bq1.py · app_bq2.py · app_stage2.py
+app/                      ★ DEPLOYED TO STREAMLIT CLOUD: bq1_site.py (menu) → home.py · app_bq1.py │ app_bq2.py │ app_stage2.py (experiment log)
 local/                    ✗ NEVER DEPLOYED
   simulate/                 replay_day.py: plays "the bank" (staging/ -> raw/)
   reports/                  final_report.py · txn_report.py · stage2_report.py · bq2_ramp_report.py

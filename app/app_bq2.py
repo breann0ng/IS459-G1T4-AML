@@ -22,7 +22,10 @@ DATA = Path(__file__).parent / "data"
 NICE = {"Structuring": "structuring", "Smurfing": "smurfing", "Cash_Withdrawal": "cash withdrawal",
         "Deposit-Send": "deposit-send"}
 
-st.set_page_config(page_title="BQ2 · Tactic change & detection", layout="wide")
+try:
+    st.set_page_config(page_title="BQ2 · Tactic change & detection", layout="wide")
+except st.errors.StreamlitAPIException:     # already set by bq1_site.py when this page runs inside the site menu
+    pass
 st.markdown("""<style>
 .tag{display:inline-block;padding:1px 9px;border-radius:999px;font-size:0.82rem;font-weight:600;white-space:nowrap}
 .yes{background:#FBE3D6;color:#9A3410} .warn{background:#FBF0D9;color:#7A5200} .no{background:#ECE6DC;color:#3F3E3A}

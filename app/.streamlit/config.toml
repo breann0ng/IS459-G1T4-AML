@@ -7,3 +7,6 @@ primaryColor = "#9085e9"
 backgroundColor = "#15111f"
 secondaryBackgroundColor = "#221b33"
 textColor = "#ece8f4"
+baseFontSize = 20
+# headings keep their usual size; only the body text grows
+headingFontSizes = ["44px", "34px", "28px", "24px", "21px", "20px"]
