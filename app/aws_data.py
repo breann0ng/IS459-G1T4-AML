@@ -94,6 +94,8 @@ def load_bq2():
     t = lambda name, where="": query(f"SELECT * FROM {name} {where}")
     pick = ("threshold", "train_from", "train_to", "validation", "train_laundering", "train_patterns",
             "validation_by_pattern")
+    cfg = get_json("progress/bq2_config.json", {})
+    SAML = cfg.get("ramp", globals()["SAML"])
     out = {"design": t("bq2r_design"),
            "part1_summary": t("bq2r_part1_summary"), "part1_weekly": t("bq2r_part1_weekly"),
            "part2_weekly": t("bq2r_part2_weekly"), "part2_rules": t("bq2r_part2_rules"),
@@ -105,6 +107,7 @@ def load_bq2():
            "decision_latest": get_json(f"models/bq2r/{SAML}/decision_latest.json", {}),
            "deployed": get_json(f"models/bq2r/{SAML}/deployed.json", {}),
            "progress": get_json("progress/bq2_weekly.json", {}),
+           "config": cfg,
            "models": {}}
     for v in ("v0", "v1", "v2"):
         m = get_json(f"models/bq2r/{SAML}/{v}/meta.json")

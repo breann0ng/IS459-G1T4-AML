@@ -1,0 +1,10 @@
+{
+ "ramp": "SAML-R",
+ "control": "SAML-C",
+ "label_lag_days": 28,
+ "replay_start": "2023-01-30",
+ "weeks": 33,
+ "week_anchors": {
+  "HI-Large": "2022-08-01"
+ }
+}

@@ -36,8 +36,23 @@ def load_aws():
     return aws_data.load_bq2()
 
 
-REPLAY_START = pd.Timestamp("2023-01-30")      # week_index 0
-LABEL_LAG_DAYS = 28
+# pipeline facts come from progress/bq2_config.json (written by build_bq2_weekly.py); these are only fallbacks
+CFG_DEFAULT = {"ramp": "SAML-R", "control": "SAML-C", "label_lag_days": 28, "replay_start": "2023-01-30",
+               "week_anchors": {"HI-Large": "2022-08-01"}}
+CFG = dict(CFG_DEFAULT)
+REPLAY_START = pd.Timestamp(CFG["replay_start"])      # week_index 0
+LABEL_LAG_DAYS = CFG["label_lag_days"]
+ANCHOR = {k: pd.Timestamp(v) for k, v in CFG["week_anchors"].items()}   # Monday of each dataset's week 1
+
+
+def apply_config(c):
+    global CFG, REPLAY_START, LABEL_LAG_DAYS, ANCHOR
+    CFG = {**CFG_DEFAULT, **(c or {})}
+    REPLAY_START = pd.Timestamp(CFG["replay_start"])
+    LABEL_LAG_DAYS = int(CFG["label_lag_days"])
+    ANCHOR = {k: pd.Timestamp(v) for k, v in CFG["week_anchors"].items()}
+
+
 WEEKLY_KEYS = ("part1_weekly", "part1_weekly_nb", "part2_weekly", "part2_rules", "part2_rules_v1", "design")
 
 
@@ -66,6 +81,7 @@ def only_processed(d):
 @st.cache_data(ttl=300)
 def load():
     d = load_aws() if aws_data.enabled() else json.loads((DATA / "bq2_data.json").read_text())
+    apply_config(d.get("config"))
     d = only_processed(d)
     bq1 = None
     if (DATA / "dashboard_data.json").exists():
@@ -74,7 +90,8 @@ def load():
     p1 = pd.DataFrame(d["part1_weekly"])
     p1["date"] = pd.to_datetime(p1["week_start"])
     for ds_, g in p1.groupby("dataset"):
-        p1.loc[g.index, "week"] = ((g["date"] - g["date"].min()).dt.days // 7 + 1).astype(int)
+        first = ANCHOR.get(ds_, g["date"].min())
+        p1.loc[g.index, "week"] = ((g["date"] - first).dt.days // 7 + 1).astype(int)
     p1["week"] = p1["week"].astype(int)
     return d, p1, pd.DataFrame(d["part2_weekly"]), pd.DataFrame(d["part2_typology"]), pd.DataFrame(d["design"]), bq1
 
@@ -113,7 +130,7 @@ def case_for_retraining(dc):
         st.dataframe(tt[["typology", "confirmed cases", "caught by " + old, "recall", "in model's training?"]],
                      hide_index=True)
     st.caption("Approve if the missed typologies have enough confirmed cases to learn from. Approving only trains and "
-               "evaluates a challenger (about $0.2 of compute); nothing goes live until the next gate. Reject to keep "
+               "evaluates a challenger; nothing goes live until the next gate. Reject to keep "
                f"{old} and keep monitoring.")
 
 
@@ -223,7 +240,7 @@ if aws_data.enabled():
 
 
 def week_of(ds_, date_str):
-    s = P1[P1["dataset"] == ds_]["date"].min()
+    s = ANCHOR.get(ds_, P1[P1["dataset"] == ds_]["date"].min())
     return int((pd.Timestamp(date_str) - s).days // 7 + 1)
 
 
@@ -336,7 +353,7 @@ tab_ibm, tab_saml = st.tabs(["HI-Large · IBM AML", "SAML-D · new tactics test"
 
 # ================================================================== HI-Large
 def ibm_tab():
-    ds_ = "HI-Large"
+    ds_ = next(iter(CFG["week_anchors"]), "HI-Large")
     if P1[P1["dataset"] == ds_].empty:
         st.info("No HI-Large results in data/bq2_data.json: run bq2/bq2_ramp_report.py after run_bq2_ramp.sh.")
         return
@@ -356,7 +373,7 @@ def ibm_tab():
     thr = float(f["js_threshold"].iloc[0])
     st.altair_chart(change_chart(f.assign(series="laundering")[["week", "js", "series"]], thr,
                                  bands=[(1, b0, "simulator warm-up"), (b0, b1 + 1, "baseline")]), width="stretch")
-    st.caption(f"Week 1 = {f['date'].min():%d %b %Y}. Weeks 1–{b0 - 1} are the simulator starting up "
+    st.caption(f"Week 1 = {ANCHOR[ds_]:%d %b %Y}. Weeks 1–{b0 - 1} are the simulator starting up "
                f"(schemes still being created), so the baseline is Weeks {b0}–{b1}. After it, every week "
                "stays far below the threshold, so no alert is raised and the model is not retrained.")
 
@@ -375,7 +392,7 @@ with tab_ibm:
 
 # ================================================================== SAML-D
 with tab_saml:
-    ds_, ctrl = "SAML-R", "SAML-C"
+    ds_, ctrl = CFG["ramp"], CFG["control"]
     stat, b0, b1 = week_status(ds_)
     lw = P1[(P1["dataset"] == ds_) & (P1["population"] == "laundering")]
     em = DZ[(DZ["group"] == "emerging") & (DZ["payments_ramp"] > 0)].copy()
@@ -578,7 +595,14 @@ with tab_saml:
         st.altair_chart(bars(pd.DataFrame(rows, columns=["measure", "model", "value"])), width="stretch")
 
     last_wk = int(lw["week"].max())
-    if dep:
+    if dep and dep_wk > last_wk:
+        first_graded = pd.Timestamp(dep) + pd.Timedelta(days=6 + LABEL_LAG_DAYS)
+        st.subheader("1st retraining · v0 vs v1")
+        st.info(f"v1 is live from Week {dep_wk} ({dep}), but the charts only show weeks with confirmed cases "
+                f"(up to Week {last_wk}). v1 has no confirmed cases yet; its first graded week appears once the "
+                f"pipeline has processed the week ending {first_graded:%Y-%m-%d} (cases are confirmed "
+                f"{LABEL_LAG_DAYS} days after a week ends).")
+    elif dep:
         c1, c2 = st.columns(2, gap="large") if dep2 else (st.container(), None)
         with c1:
             round_bars("v0", "v1", dep, f"1st retraining · v0 vs v1 (Weeks {dep_wk}–{last_wk})",

@@ -84,7 +84,8 @@ data "aws_iam_policy_document" "sfn_bq2" {
   statement {
     sid       = "Pointer"
     actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["arn:aws:s3:::${var.bucket}/progress/bq2_weekly.json", "arn:aws:s3:::${var.bucket}/models/bq2r/*"]
+    resources = ["arn:aws:s3:::${var.bucket}/progress/bq2_weekly.json", "arn:aws:s3:::${var.bucket}/progress/bq2/*",
+    "arn:aws:s3:::${var.bucket}/models/bq2r/*"]
   }
   statement {
     sid       = "Notify"

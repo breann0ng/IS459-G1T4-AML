@@ -4,7 +4,7 @@ bq2_part1_tactics_spark.py                                               (BQ2, p
 labels and pattern names), the way a bank's analytics team would; no model is involved.
 
 Run on EMR, after clean_transactions_spark.py and parse_patterns_spark.py for the dataset:
-    spark-submit [S3 confs] bq2_part1_tactics_spark.py <dataset> <baseline from> <baseline to> [tag]
+    spark-submit [S3 confs] bq2_part1_tactics_spark.py <dataset> <baseline from> <baseline to> [tag|-] [as-of date]
     e.g. SAML-R 2022-10-03 2023-01-29     ramp: the training period is the baseline
          SAML-C 2022-10-03 2023-01-29     control: nothing changes, so any alarm is false
          HI-Large 2022-08-29 2022-09-11   IBM: weeks 5-6 (weeks 1-4 are simulator warm-up)
@@ -53,6 +53,8 @@ DATASET = sys.argv[1] if len(sys.argv) > 1 else "SAML-R"
 BASE_FROM = sys.argv[2] if len(sys.argv) > 2 else "2022-10-03"
 BASE_TO = sys.argv[3] if len(sys.argv) > 3 else "2023-01-29"
 TAG = sys.argv[4] if len(sys.argv) > 4 else ""      # e.g. _nb: new-baseline run, written to separate tables
+TAG = "" if TAG == "-" else TAG                     # "-" = no tag
+AS_OF = sys.argv[5] if len(sys.argv) > 5 else ""    # weekly replay: only payments up to this date (YYYY-MM-DD)
 JS_MIN = 0.10          # js below this is never a change, whatever the noise
 P_MAX = 0.01           # chi-square p-value must be below this
 EPS = 0.001            # PSI smoothing
@@ -74,6 +76,8 @@ def weekly_counts():
     rd = lambda name: spark.read.parquet(f"{CURATED}/{name}").filter(F.col("dataset") == DATASET)
     tx = rd("transactions").select("txn_id", "txn_time", "txn_date", "from_bank", "to_bank", "amount_paid",
                                    "payment_currency", "payment_format", "is_cross_currency")
+    if AS_OF:
+        tx = tx.filter(F.col("txn_date") <= F.lit(AS_OF).cast("date"))
     lab = rd("labels").select("txn_id", F.col("is_laundering").cast("int").alias("label"))
     first = Window.partitionBy("txn_id").orderBy("txn_time", "scheme_id")
     sch = (rd("scheme_txns").filter("found_in_transactions")
