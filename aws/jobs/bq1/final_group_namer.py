@@ -35,6 +35,9 @@ MODEL_DIR = f"{T.ROOT}/models/{RUN}"
 # the alerts of the previous max_linked_days days are read too; only this day's rows are graded and saved,
 # in the live_* tables (one partition per day). Unset = the one-off evaluation run, as before.
 RUN_DATE = os.environ.get("AML_RUN_DATE")
+# Weekly mode (aml_bq1_weekly): AML_RUN_DATE = the week's Monday (its run_date partition) and
+# AML_RUN_TO = its Sunday, so the whole week is named. Unset = one day, as in daily mode.
+RUN_TO = os.environ.get("AML_RUN_TO") or RUN_DATE
 EXTRA = ("run_date",) if RUN_DATE else ()
 
 
@@ -68,10 +71,15 @@ def main():
 
     flt = ds.field("dataset") == DATASET
     if RUN_DATE:                              # this day + the days its groups can link back to
-        since = (pd.Timestamp(RUN_DATE) - pd.Timedelta(days=int(G.MAX_LINKED_DAYS))).strftime("%Y-%m-%d")
-        flt = flt & (ds.field("run_date") >= since) & (ds.field("run_date") <= RUN_DATE)
+        since = pd.Timestamp(RUN_DATE) - pd.Timedelta(days=int(G.MAX_LINKED_DAYS))
+        span = pd.Timestamp(RUN_TO) - pd.Timestamp(RUN_DATE)        # 0 days (daily) or 6 (weekly)
+        # a run_date partition holds RUN_DATE .. RUN_DATE + span, so start one span earlier
+        flt = (flt & (ds.field("run_date") >= (since - span).strftime("%Y-%m-%d"))
+                   & (ds.field("run_date") <= RUN_DATE))
     al = S.load_table(table("final_alert_rows"), flt)
     al["date"] = pd.to_datetime(al["date"]).dt.date
+    if RUN_DATE:                              # exactly max_linked_days of context before the period
+        al = al[al["date"] >= since.date()]
     al = al.reset_index(drop=True)
     print(f"[name] {DATASET}: {len(al)} alerts (account-days) over {al['date'].nunique()} days, "
           f"{int(al['label'].sum())} truly laundering")
@@ -92,9 +100,9 @@ def main():
 
     truth_flt = ds.field("dataset") == DATASET
     if RUN_DATE:                              # grade and save this day only (earlier days gave context)
-        g = g[g["date"] == pd.Timestamp(RUN_DATE).date()].copy()
+        g = g[(g["date"] >= pd.Timestamp(RUN_DATE).date()) & (g["date"] <= pd.Timestamp(RUN_TO).date())].copy()
         truth_flt = truth_flt & (ds.field("run_date") == RUN_DATE)
-        print(f"[name] daily mode: {len(g)} alerts on {RUN_DATE}")
+        print(f"[name] {len(g)} alerts from {RUN_DATE} to {RUN_TO}")
     truth = S.load_table(table("final_truth"), truth_flt)
     tt = truth.assign(p=S.true_class(truth.rename(columns={"pattern_label": "pattern_label"}), merge))
     total_true = tt.groupby("p")["count"].sum().to_dict()

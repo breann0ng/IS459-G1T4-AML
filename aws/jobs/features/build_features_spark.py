@@ -134,10 +134,14 @@ def node(bank, account):
 # =========================================================================== load inputs
 def load_transactions():
     all_txns = spark.read.parquet(f"{CURATED}/transactions").filter(F.col("dataset") == DATASET)
-    # Median payment per currency over the WHOLE dataset, so every chunk uses the same reference.
-    med_paid = all_txns.groupBy("payment_currency").agg(
+    # Median payment per currency: whole dataset; a chunk uses only payments up to its last day
+    # (no future weeks, even when later weeks are already cleaned).
+    med_base = all_txns
+    if OUTPUT_TO:
+        med_base = med_base.filter(F.col("txn_date") <= F.lit(OUTPUT_TO).cast("date"))
+    med_paid = med_base.groupBy("payment_currency").agg(
         F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
-    med_recv = all_txns.groupBy("receiving_currency").agg(
+    med_recv = med_base.groupBy("receiving_currency").agg(
         F.expr("percentile_approx(amount_received, 0.5)").cast("double").alias("med_recv"))
     txns = all_txns
     if OUTPUT_FROM:
@@ -308,6 +312,20 @@ def gather_scatter_max(edges, W, out_name):
 
 
 # ============================================================================ multi-hop
+def since(df, days):
+    """Chunk mode: keep only payments from `days` before OUTPUT_FROM. Each heavy step gets the
+    history its OUTPUT days need and no more, so the chunk's own rows are unchanged:
+      fan-in / fan-out / gather-scatter over w days   -> w days
+      scatter-gather (2 hops within 3 days, then a 3-day sliding max)  -> 2 x 3 = 6 days
+      cycles (closed within 7 days, then cycles_7d sums 7 days)        -> 7 + 6 = 13 days
+    The hub list is still built from the full look-back (hubs depend on how much is read).
+    Whole-dataset runs (no OUTPUT_FROM) are untouched."""
+    if not OUTPUT_FROM:
+        return df
+    cut = F.unix_timestamp(F.to_timestamp(F.lit(OUTPUT_FROM))) - days * DAY
+    return df.filter(F.col("ts") >= cut)
+
+
 def non_hub_edges(edges):
     degree = (edges.select(F.col("src").alias("n"), F.col("dst").alias("cp"))
                    .unionByName(edges.select(F.col("dst").alias("n"), F.col("src").alias("cp")))
@@ -417,11 +435,12 @@ def main():
     fan_cols = []
     for w in WINDOWS_DAYS:
         W = w * DAY
-        fin = sliding_distinct_max(edges.select(F.col("dst").alias("acct"), F.col("src").alias("cp"), "ts"),
+        e_w = since(edges, w)          # chunk mode: only the w days of history this window needs
+        fin = sliding_distinct_max(e_w.select(F.col("dst").alias("acct"), F.col("src").alias("cp"), "ts"),
                                    ["acct"], "cp", W, f"fanin_max_{w}d")
-        fout = sliding_distinct_max(edges.select(F.col("src").alias("acct"), F.col("dst").alias("cp"), "ts"),
+        fout = sliding_distinct_max(e_w.select(F.col("src").alias("acct"), F.col("dst").alias("cp"), "ts"),
                                     ["acct"], "cp", W, f"fanout_max_{w}d")
-        gs = gather_scatter_max(edges, W, f"gs_max_{w}d")
+        gs = gather_scatter_max(e_w, W, f"gs_max_{w}d")
         feats = (feats.join(fin, ["acct", "date"], "left")
                       .join(fout, ["acct", "date"], "left")
                       .join(gs, ["acct", "date"], "left"))
@@ -431,10 +450,10 @@ def main():
     if USE_SCATTER_GATHER or USE_CYCLES:
         small = non_hub_edges(edges).persist(DISK)
         if USE_SCATTER_GATHER:
-            feats = feats.join(scatter_gather_features(small), ["acct", "date"], "left")
+            feats = feats.join(scatter_gather_features(since(small, 2 * SG_WINDOW_DAYS)), ["acct", "date"], "left")
             graph_cols += ["sg_src_max", "sg_dst_max", "hop2_out", "hop2_in", "mid_paths"]
         if USE_CYCLES:
-            feats = feats.join(cycle_features(small), ["acct", "date"], "left")
+            feats = feats.join(cycle_features(since(small, CYCLE_WINDOW_DAYS + 6)), ["acct", "date"], "left")
             feats = feats.fillna(0, subset=["cycles_today"])
             # from the cached daily table (same dates as feats): asking feats itself ran the
             # whole uncached feature plan once extra just to find this date
