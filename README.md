@@ -48,6 +48,23 @@ time in two terminals (hence the different ports).
 
 If `streamlit` is "not recognised", the environment is not active: repeat the `activate` line from step 2.
 
+### Updating the BQ1 results as the weekly pipeline finishes more weeks (team only, needs AWS)
+
+The BQ1 page reads `app/data/dashboard_data_live_HI-Large-live.json`: every HI-Large week that the Step Functions
+pipeline `aml_bq1_weekly` has finished, merged (counts added up, rates recomputed). After a new week finishes
+(`progress/bq1_weekly/HI-Large-live/<week>.json` says `SUCCEEDED`), refresh it from the repository root (PowerShell):
+
+```powershell
+$env:AWS_PROFILE = "g1t4"; $env:AML_ROOT = "s3://is459-g1t4-aml"; $env:AML_LIVE = "1"
+cd local\reports
+..\..\.venv\Scripts\python final_report.py HI-Large-live > ..\..\results\final\final_report_live.txt
+Move-Item -Force dashboard_data_live_HI-Large-live.json ..\..\app\data\
+cd ..\..
+```
+
+Then commit the JSON. Scheme timings on the Speed tab stay from the one-off run of 12–25 Sep, because the weekly
+pipeline cuts schemes at the week boundary. If the live file is missing, the page falls back to the one-off run.
+
 ## Repository layout: grouped by where things run
 
 ```

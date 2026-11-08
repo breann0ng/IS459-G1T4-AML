@@ -15,8 +15,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# final model; after the full HI-Large run, point this (or env BQ1_DATA) at that run's file
-DATA_FILE = os.environ.get("BQ1_DATA", "dashboard_data_enrui_breann_mld20.json")
+# the weekly pipeline's merged results (local/reports/final_report.py with AML_LIVE=1) when present, else the one-off run
+_LIVE = Path(__file__).parent / "data" / "dashboard_data_live_HI-Large-live.json"
+DATA_FILE = os.environ.get("BQ1_DATA", _LIVE.name if _LIVE.exists() else "dashboard_data_enrui_breann_mld20.json")
 BLUE, ORANGE, GREY, INK = "#3987e5", "#d95926", "#898781", "#c9c2dc"   # validated on the dark purple surface
 RAG = {"Red": "#5a2330", "Yellow": "#5a4517", "Green": "#1e4a2c"}   # dark status tints; the word is always shown too
 ACTION = {"Red": "Analysts check these by hand", "Yellow": "Spot-check a sample",
@@ -84,6 +85,13 @@ def stage2_class(p):
 
 
 d = load()
+# Scheme timings (speed) always come from the one-off run of the same days: the weekly pipeline scores one week at a
+# time, so every scheme that crosses a week boundary is cut short there and its timing is wrong.
+_ONEOFF = Path(__file__).parent / "data" / "dashboard_data_enrui_breann_mld20.json"
+SPEED_FROM_ONEOFF = bool(d.get("weeks")) and _ONEOFF.exists()
+if SPEED_FROM_ONEOFF:
+    _o = json.loads(_ONEOFF.read_text())
+    d = {**d, **{k: _o[k] for k in ("schemes", "schemes_by_pattern", "schemes_total", "scheme_hours_hist") if k in _o}}
 s1 = pd.DataFrame(d["stage1"])
 ad = s1[s1["level"] == "account_day"]
 frozen = ad[ad["cutoff"] == "frozen_threshold"].iloc[0]
@@ -98,10 +106,13 @@ st.title("BQ1 · Early detection")
 st.markdown("<div style='font-size:1.35rem;line-height:1.4;font-weight:600;margin:.1rem 0 .5rem'>How can we "
             "automatically detect laundering patterns early, while keeping false alerts low enough for analysts "
             "to manage?</div>", unsafe_allow_html=True)
+_weeks = d.get("weeks") or []
+_how = (f"{len(_weeks)} weeks scored by the weekly pipeline (Step Functions), more added as each week finishes"
+        if _weeks else "one held-out test run")
 st.markdown(f"<div style='display:inline-block;background:rgba(144,133,233,.13);border:1px solid #3a3150;"
-            f"border-radius:999px;padding:.35rem 1rem;margin:.2rem 0 1rem'><b>Test data:</b> {days} unseen "
-            f"days of HI-Large ({pd.to_datetime(frozen['date_from']):%d %b} to {pd.to_datetime(frozen['date_to']):%d %b %Y}, "
-            f"{frozen['payments'] / 1e6:.1f}M payments). The model never saw these days in training.</div>",
+            f"border-radius:12px;padding:.4rem 1rem;margin:.2rem 0 1rem'><b>Test data:</b> {days} unseen days of HI-Large "
+            f"({pd.to_datetime(frozen['date_from']):%d %b} to {pd.to_datetime(frozen['date_to']):%d %b %Y}, "
+            f"{frozen['payments'] / 1e6:.1f}M payments), {_how}. The model never saw these days in training.</div>",
             unsafe_allow_html=True)
 tab1, tab2, tab3, tab4 = st.tabs([":material/notifications: Alerts & accuracy", ":material/timer: Speed",
                                   ":material/groups: Who checks what", ":material/inventory_2: Archived findings"])
@@ -327,7 +338,10 @@ with tab2:
                  "last payment; only schemes that started in the test days count. Pick an hour on the bottom axis: grey "
                  "is the share of schemes already over, orange the share already detected. The end-of-day clock assumes "
                  "alerts reach analysts at midnight after the day closes; the live clock is a best case, because each "
-                 "score uses that whole day's payments."))
+                 "score uses that whole day's payments."
+                 + (" Scheme timings on this tab come from the one-off run of the same days: the weekly pipeline scores "
+                    "one week at a time and cuts every scheme that crosses a week boundary short, so its timings would "
+                    "be wrong." if SPEED_FROM_ONEOFF else "")))
 
         # ---------------------------------------------------------- 2a. per pattern: length vs time to detection
         det_col = "hours_to_first_flag" if live else "hours_to_alert"
@@ -561,18 +575,22 @@ with tab4:
             "guesses that go wrong.")
 
     tg_file = Path(__file__).parent / "data" / "two_guesses_validation.json"
-    tg = json.loads(tg_file.read_text()) if tg_file.exists() else None
-    one_large = s2["recall"].get("MACRO (7 patterns)") if not s2.empty else None
+    tg_val = json.loads(tg_file.read_text()) if tg_file.exists() else None
+    t2d = top2[top2["true_pattern"] != "ALL"] if not top2.empty else pd.DataFrame()
+    if not t2d.empty:                         # HI-Large test, from the saved second guesses
+        tg = {"patterns": [{"pattern": r.true_pattern, "first": r.top1, "top2": r.top2, "cases": int(r.cases)}
+                           for r in t2d.itertuples()],
+              "first_macro": t2d["top1"].mean(), "top2_macro": t2d["top2"].mean(), "where": f"the HI-Large test ({days} days)"}
+    else:
+        tg = dict(tg_val, where="the validation days (HI-Small and HI-Medium)") if tg_val else None
     g1, g2, g3 = st.columns(3)
     if tg:
         g1.metric("Right with one guess", pct(tg["first_macro"]),
-                  help="Validation days (HI-Small + HI-Medium), final namer: of truly laundering alerts with a known "
-                       "pattern, the share whose pattern is the first guess, averaged over the 7 patterns."
-                       + (f" On the HI-Large test the first guess is right {pct(one_large)} of the time." if one_large else ""))
+                  help=f"On {tg['where']}: of truly laundering alerts with a known pattern, the share whose pattern is the "
+                       "first guess, averaged over the 7 patterns.")
         g2.metric("Right within two guesses", pct(tg["top2_macro"]),
                   f"+{(tg['top2_macro'] - tg['first_macro']) * 100:.0f} points with a second guess", delta_arrow="off",
-                  help="Same alerts: the true pattern is the first or the second guess. HI-Large's two-guess score "
-                       "comes with the next full run, which saves second guesses.")
+                  help=f"Same alerts: the true pattern is the first or the second guess. On {tg['where']}.")
     g3.metric("Patterns to check", "2 of 8", help="7 pattern names plus 'unclassified'.")
 
     if tg:
@@ -591,27 +609,32 @@ with tab4:
                      alt.Tooltip("cases:Q", format=",", title="Alerts checked")])
         chart((link + dots).properties(height=alt.Step(34)), width="stretch")
         tp["gain"] = tp["top2"] - tp["first"]
-        big, worst = tp.sort_values("gain").iloc[-1], tp.sort_values("top2").iloc[0]
-        weak = tp[tp["first"] < 0.5].sort_values("first")["name"].str.lower().tolist()
-        takeaway(f"a single pattern name is only a reliable starting point for long, structured schemes; for "
-                 f"{', '.join(weak) or 'some patterns'} the first guess is right less than half the time, so analysts "
-                 f"should treat it as a hint. A second guess turns the name into a short list that holds the right "
-                 f"answer {pct(tg['top2_macro'])} of the time, worst case {worst['name'].lower()} at {pct(worst['top2'])}.",
+        big = tp.sort_values("gain").iloc[-1]
+        strong = tp[tp["first"] >= 0.5].sort_values("first", ascending=False)["name"].str.lower().tolist()
+        weak = tp[tp["first"] < 0.5]
+        worst2 = tp.sort_values("top2").iloc[0]
+        vs_val = (f" On the validation days the same namer scored {pct(tg_val['first_macro'])} and "
+                  f"{pct(tg_val['top2_macro'])}: HI-Large is harder to name." if tg_val and tg["where"].startswith("the HI-Large") else "")
+        takeaway(f"a single pattern name is a reliable starting point only for {', '.join(strong) or 'no pattern'}; for the "
+                 f"other {len(weak)} patterns the first guess is right less than half the time. A second guess lifts the "
+                 f"average from {pct(tg['first_macro'])} to {pct(tg['top2_macro'])}, biggest for {big['name'].lower()}, "
+                 f"but it is still wrong for about {round((1 - tg['top2_macro']) * 10)} in 10 alerts. The name should be "
+                 "shown as a starting hint, not a verdict, and analysts should still map the money themselves.",
                  ["**Which half of BQ1 this answers.** The 'manageable for analysts' half. Stage 1 sets how many alerts "
                   "arrive; the pattern name sets how much work each one is, because it tells the analyst where to start "
                   "(a cycle: follow the money coming back; fan in: check the many senders).",
-                  "**What the shape tells us.** Patterns with a clear shape over several days (layering, scatter "
-                  "gather) are named right first time; short or shapeless ones (cycle, random) are not, but their right "
-                  "name is usually the second guess. The gain from the second guess is largest exactly where the first "
-                  "guess is weakest.",
-                  "**What follows.** Showing two names costs one extra word per alert and removes most wrong starting "
-                  "points. It is the problem behind our proposal's MAS case: 8 of 9 fined banks had flagged transactions "
-                  "that nobody properly investigated.",
-                  "**Limits.** These are validation days; the HI-Large figure comes with the next full run. A wrong name "
-                  "never hides an alert: the risk score alone decides whether an account is alerted."], read=(
-                 "Each row is a pattern. Grey dot: how often the model's first guess is the right pattern; blue dot: "
-                 "how often the right pattern is one of its two guesses. Validation days (HI-Small and HI-Medium), "
-                 "final namer, truly laundering alerts of a known pattern."))
+                  f"**What the shape tells us.** Layering, the most common pattern, is named right first time; the "
+                  f"others are often called layering instead, so their first guess is weak, but their right name is "
+                  f"frequently the second guess. The weakest even with two guesses is {worst2['name'].lower()} "
+                  f"({pct(worst2['top2'])}).{vs_val}",
+                  "**What follows.** Show both names on every alert, and tell analysts which patterns the first name can "
+                  "be trusted for. It is the problem behind our proposal's MAS case: 8 of 9 fined banks had flagged "
+                  "transactions that nobody properly investigated.",
+                  "**Limits.** A wrong name never hides an alert: the risk score alone decides whether an account is "
+                  "alerted. Bipartite and stack are named together as layering."],
+                 read=f"Each row is a pattern. Grey dot: how often the model's first guess is the right pattern; blue dot: "
+                      f"how often the right pattern is one of its two guesses. Measured on {tg['where']}, on truly "
+                      "laundering alerts of a known pattern.")
     ex = pd.DataFrame(d.get("alert_examples") or [])
     if not ex.empty:
         show = pd.DataFrame({
