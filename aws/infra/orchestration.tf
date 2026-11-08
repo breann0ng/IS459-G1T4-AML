@@ -5,7 +5,7 @@
 # was built in the console and is not managed here yet; import it once its definition is in
 # aws/step-functions/ (see aws/step-functions/README.md).
 
-data "aws_caller_identity" "me" {}
+# data.aws_caller_identity.me is declared in bq2_weekly.tf (one per module)
 
 locals {
   account_id   = data.aws_caller_identity.me.account_id

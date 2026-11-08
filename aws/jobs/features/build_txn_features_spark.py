@@ -82,7 +82,10 @@ spark.conf.set("spark.sql.ansi.enabled", "false")
 
 def main():
     all_tx = spark.read.parquet(f"{CURATED}/transactions").filter(F.col("dataset") == DATASET)
-    med = all_tx.groupBy("payment_currency").agg(
+    med_base = all_tx       # median per currency: a chunk uses only payments up to its last day
+    if CHUNK_TO:
+        med_base = med_base.filter(F.col("txn_date") <= F.lit(CHUNK_TO).cast("date"))
+    med = med_base.groupBy("payment_currency").agg(
         F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
     tx = all_tx
     if CHUNK_FROM:     # read PAIR_DAYS of history before the chunk, write only the chunk

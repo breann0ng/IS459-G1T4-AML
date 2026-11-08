@@ -10,6 +10,7 @@ machine only names the S3 path and the arguments, so the two folders are linked 
 | `aml_bq1_weekly.asl.json` (BQ1, **deployed**) | EventBridge **rule**: a weekly bank file finished landing in `raw/transactions/set=<dataset>/week=<Monday>/` (its `_SUCCESS` marker) | clean -> patterns -> features v2 -> txn -> v3 -> score -> name patterns |
 | `aml_bq2_weekly.json` (BQ2, **deployed**) | EventBridge **Scheduler** `aml-bq2-weekly` (created disabled) | Part 1 + Part 2 score/eval -> alert? -> SNS + SQS approval -> retrain challenger -> approval -> deploy. See "aml_bq2_weekly" below |
 | `aml_daily.json` (BQ1 daily variant, **not deployed**) | EventBridge rule `aml_daily_trigger.json` on day files | See "aml-daily (not deployed)" below |
+| `aml_bq1_joey.asl.json` (BQ1, Joey, **in progress**) | By hand (later: Joey's own rule on `_manifest.json`) | Many weeks in one run: clean weeks in parallel -> patterns -> features + score per week in parallel -> name weeks in order. See "aml_bq1_joey" below |
 
 Terraform: `aws/infra/orchestration.tf` (BQ1) and `aws/infra/bq2_weekly.tf` (BQ2). The BQ1 file creates the weekly state machine, its role, its CloudWatch
 log group (ERROR, 90 days), the S3 -> EventBridge switch and the rule. `${bucket}`, `${application_id}`
@@ -82,3 +83,48 @@ argument for weekly, `AML_RUN_DATE` for daily; neither = the whole dataset), so 
   -> score -> eval -> SNS email -> **gate 2** -> `bq2_deploy.py` (writes `deployed.json`) -> advance pointer.
   Reject or timeout skips to the pointer advance. No automatic retries (each retry costs EMR money).
   Infra for it: `aws/infra/bq2_weekly.tf` (schedule is created DISABLED).
+
+## aml_bq1_joey (in progress)
+
+Joey's faster, isolated version of `aml_bq1_weekly`. It runs the same jobs on the same frozen model, so
+the features and alerts must come out identical; it only changes how the jobs are ordered and grouped.
+It uses its own dataset name (`HI-Medium-joey`), EMR app (`aml-bq1-joey`), role (`aml-sfn-bq1-joey`),
+code folder (`dev/joey/jobs/`) and run log (`progress/bq1_joey/`), so it never touches a teammate's run.
+
+```
+Input {dataset, first_week, score_from, last_week, code_prefix, app_id, start_at?}
+ -> LogStart
+ -> CleanWeeks       Map over every week first_week..last_week, 3 at a time      (clean)
+      ...all weeks must finish...
+ -> ParsePatterns    once, for the whole dataset
+ -> FeatureAndScore  Map over the scored weeks score_from..last_week              (build_week_features -> score)
+ -> NameWeeks        Map over the scored weeks, 1 at a time, oldest first         (name)
+ -> LogSuccess        any failure -> LogFailure -> Fail (no retries)
+```
+
+What happens, and why in this order:
+
+1. **No training.** The model was trained once (4 Nov: `train_txn.py` -> `group_stage2.py` ->
+   `final_train.py`) and is frozen in `models/bq1/`. This pipeline only predicts. Retraining belongs to
+   BQ2 (`aml_bq2_weekly`: retrain challenger -> approval -> deploy).
+2. **Cleaning runs in parallel.** Each week's file is cleaned on its own (`week=<Monday>` folder in,
+   one `week` partition out), so up to 3 weeks are cleaned at the same time.
+3. **Wait, then features + score per week, in parallel.** This step needs the cleaning to have
+   finished: a week's features look back 21 days into the cleaned payments of earlier weeks, and they
+   take the pattern labels from `curated/scheme_txns`, which ParsePatterns builds from all the cleaned
+   weeks. After that the scored weeks are independent: week N reads earlier weeks' cleaned payments,
+   never their features (every read of a feature table is cut to the week's own dates). So each week
+   runs as its own branch: `build_week_features.py` (features v2 -> txn -> v3 in one Spark
+   application) then `score_final_spark.py`, which gives every payment its laundering probability and
+   flags those above the threshold (0.9763). Two weeks at once need about 32 vCPU on the app; the Map
+   runs 1 at a time until the app's cap is raised.
+4. **Naming starts after every week is scored, and runs one week at a time.** The namer groups each
+   alert with alerts up to `max_linked_days` (20) days earlier, so a week needs the earlier weeks'
+   *scores* (`live_alert_rows`), which are all done by then. It never reads earlier weeks' *names*,
+   so the order is not needed for correctness; one at a time is because each namer job takes a 48 GB
+   driver and the app's cap is 64 GB.
+
+History weeks (before `score_from`) are only cleaned: they exist so the first scored week has its 21 days
+of look-back. Each run writes `progress/bq1_joey/<dataset>/<run>.json`: status, failed step and error, and
+each step's start, end and EMR job id (to compare with `aml_bq1_weekly`). `start_at` (e.g. `"name"`) re-runs
+only the last part after a fix.

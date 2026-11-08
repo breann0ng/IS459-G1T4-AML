@@ -22,11 +22,13 @@ Notes
     * Amounts keep 8 decimal places, so small Bitcoin payments are not rounded to 0.
     * Weeks are Monday-to-Sunday; week 1 is the week of the earliest transaction. A weekly run
       only sees one week, so it counts from the dataset's FIRST_DAY instead (same numbers as batch).
-    * A "-live" dataset (HI-Large-live) is a weekly replay of a Kaggle set and uses its settings.
+    * A replay dataset (HI-Large-live, HI-Medium-joey) is a weekly replay of a Kaggle set and uses
+      its settings (the base name is the HI-Small / HI-Medium / HI-Large at the start of the name).
     * txn_id = SHA-256 of the cleaned values. parse_patterns_spark.py uses the same recipe.
 """
 
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 
@@ -39,7 +41,9 @@ ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never w
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
 WEEK = sys.argv[2] if len(sys.argv) > 2 else None   # optional: Monday of the one weekly file to clean
-BASE = DATASET.removesuffix("-live")                 # HI-Large-live -> HI-Large settings
+# Replays use their Kaggle set's settings: HI-Large-live, HI-Medium-joey -> HI-Large, HI-Medium
+_base = re.match(r"HI-(Small|Medium|Large)", DATASET)
+BASE = _base.group(0) if _base else DATASET
 
 # First day of each dataset (from the Kaggle files): weekly runs number weeks from its Monday,
 # so week N means the same dates in a weekly run and a whole-dataset run.

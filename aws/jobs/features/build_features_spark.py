@@ -133,10 +133,14 @@ def node(bank, account):
 # =========================================================================== load inputs
 def load_transactions():
     all_txns = spark.read.parquet(f"{CURATED}/transactions").filter(F.col("dataset") == DATASET)
-    # Median payment per currency over the WHOLE dataset, so every chunk uses the same reference.
-    med_paid = all_txns.groupBy("payment_currency").agg(
+    # Median payment per currency: whole dataset; a chunk uses only payments up to its last day
+    # (no future weeks, even when later weeks are already cleaned).
+    med_base = all_txns
+    if OUTPUT_TO:
+        med_base = med_base.filter(F.col("txn_date") <= F.lit(OUTPUT_TO).cast("date"))
+    med_paid = med_base.groupBy("payment_currency").agg(
         F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
-    med_recv = all_txns.groupBy("receiving_currency").agg(
+    med_recv = med_base.groupBy("receiving_currency").agg(
         F.expr("percentile_approx(amount_received, 0.5)").cast("double").alias("med_recv"))
     txns = all_txns
     if OUTPUT_FROM:
