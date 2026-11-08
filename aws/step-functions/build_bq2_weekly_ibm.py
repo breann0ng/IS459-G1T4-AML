@@ -13,6 +13,7 @@ file picks the week, the same two approval gates (SQS task token) and the same S
     leads straight to grading it instead of training. An alert on the real data only sends an email (no challenger).
 
     python aws/step-functions/build_bq2_weekly_ibm.py --account 390402569482
+Everything lives under s3://<bucket>/bq2_ibm/ (deploy the code with AML_JOBS_PREFIX=bq2_ibm/jobs).
 """
 import argparse
 import json
@@ -34,10 +35,9 @@ ap.add_argument("--hide", default="fan_in,fan_out")        # the staged new tact
 ap.add_argument("--intro", default="2022-10-03")           # ... appears on this day (Week 10)
 ap.add_argument("--label-lag-days", type=int, default=28)
 ap.add_argument("--max-executors", type=int, default=3)   # the team app is capped at 16 vCPU / 64 GB
-ap.add_argument("--models", default="all=models/bq2_ibm/final,nofan=models/bq2_ibm/final_nofan",
-                help="BQ1 model and the one that never saw the hidden patterns (kept apart from the team's models/)")
-ap.add_argument("--jobs-prefix", default="jobs_bq2_ibm",
-                help="where this branch's scripts + jobs.zip are deployed (AML_JOBS_PREFIX for deploy.sh); venv stays in jobs/")
+ap.add_argument("--prefix", default="bq2_ibm",
+                help="everything this pipeline reads and writes lives under s3://<bucket>/<prefix>/ (its own curated/,"
+                     " analytics/, models/, progress/, jobs/), so the team's batch HI-Large and models/ are never touched")
 ap.add_argument("--out", default="aws/step-functions/aml_bq2_weekly_ibm.json")
 a = ap.parse_args()
 role = a.role_arn or f"arn:aws:iam::{a.account}:role/aml-emr-serverless-job"
@@ -53,11 +53,12 @@ while d + timedelta(days=6) <= last_known + timedelta(days=6):
     d += timedelta(days=7)
 ends = [(date.fromisoformat(s) + timedelta(days=6)).isoformat() for s in starts]
 
-ROOT = f"s3://{a.bucket}"
-PTR = "progress/bq2_weekly_ibm.json"
+ROOT = f"s3://{a.bucket}/{a.prefix}"             # AML_ROOT of every job
+KEY = f"{a.prefix}/"                             # the same root as an S3 key prefix, for the S3 SDK states
+PTR = f"{KEY}progress/bq2_weekly_ibm.json"
 COMMON = [f"spark.emr-serverless.driverEnv.AML_ROOT={ROOT}", f"spark.executorEnv.AML_ROOT={ROOT}",
           f"spark.emr-serverless.driverEnv.AWS_REGION={a.region}", f"spark.executorEnv.AWS_REGION={a.region}",
-          f"spark.archives={ROOT}/jobs/venv.tar.gz#environment",
+          f"spark.archives=s3://{a.bucket}/jobs/venv.tar.gz#environment",   # the team's Python environment
           "spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python",
           "spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python",
           "spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python",
@@ -70,19 +71,18 @@ SPARK = COMMON + ["spark.executor.cores=4", "spark.executor.memory=10g", "spark.
 PYONLY = COMMON + ["spark.executor.cores=1", "spark.executor.memory=2g", "spark.executor.instances=1",
                    "spark.dynamicAllocation.initialExecutors=1", "spark.dynamicAllocation.maxExecutors=1"]
 HIDE_ENV = {"BQ2_HIDE": a.hide, "BQ2_HIDE_BEFORE": a.intro}
-MODEL_ENV = {"BQ2_MODELS": a.models}
 EMERGE_ENV = {"BQ2_EMERGING": a.hide, "BQ2_FIRST_DOSE": a.intro}
 
 
 def conf(c, env=None):
     extra = [f"spark.emr-serverless.driverEnv.{k}={v}" for k, v in (env or {}).items()] + \
             [f"spark.executorEnv.{k}={v}" for k, v in (env or {}).items()]
-    return f"--py-files {ROOT}/{a.jobs_prefix}/jobs.zip " + " ".join(f"--conf {x}" for x in c + extra)
+    return f"--py-files {ROOT}/jobs/jobs.zip " + " ".join(f"--conf {x}" for x in c + extra)
 
 
 def emr(name, script, args, nxt, python_only=False, env=None, minutes=60, **extra):
     """Run one EMR Serverless job and wait for it (.sync). `args` is an ASL intrinsic or a list of constants."""
-    drv = {"EntryPoint": f"{ROOT}/{a.jobs_prefix}/{script}",
+    drv = {"EntryPoint": f"{ROOT}/jobs/{script}",
            "SparkSubmitParameters": conf(PYONLY if python_only else SPARK, env)}
     if isinstance(args, str):
         drv["EntryPointArguments.$"] = args
@@ -101,7 +101,7 @@ def emr(name, script, args, nxt, python_only=False, env=None, minutes=60, **extr
 
 def guarded(states, step, label, job, nxt):
     """Has<label>? (marker exists -> skip) -> Build<label> -> Mark<label>. Returns the first state's name."""
-    key = f"States.Format('progress/bq2/{step}_{{}}.done', $.week_start)"
+    key = f"States.Format('{KEY}progress/bq2/{step}_{{}}.done', $.week_start)"
     states[f"Has{label}?"] = {"Type": "Task", "Resource": "arn:aws:states:::aws-sdk:s3:headObject",
                               "Parameters": {"Bucket": a.bucket, "Key.$": key}, "ResultPath": None, "Next": nxt,
                               "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": None,
@@ -176,10 +176,10 @@ guarded(det, "txn_large", "TxnFeatures",
         "HasV3Features?")
 guarded(det, "v3_large", "V3Features", emr("bq2-v3-features", "build_features_v3_spark.py", wk, None, minutes=240),
         "HasScores?")
-guarded(det, "bq2_score", "Scores", emr("bq2-score-both-models", "bq2_ibm_score_spark.py", wk, None, env=MODEL_ENV, minutes=120),
+guarded(det, "bq2_score", "Scores", emr("bq2-score-both-models", "bq2_ibm_score_spark.py", wk, None, minutes=120),
         "PrepToDate")
 det["PrepToDate"] = emr("bq2-prep", "bq2_ibm_part2_prep_spark.py",
-                        "States.Array('%s', '%s', $.week_end)" % (DS, a.score_from), "Evaluate", env={**HIDE_ENV, **MODEL_ENV},
+                        "States.Array('%s', '%s', $.week_end)" % (DS, a.score_from), "Evaluate", env=HIDE_ENV,
                         Comment="Part 2 tables (both datasets, both versions) for every scored week so far")
 asof = "States.Array('{}', 'deployed', '--as-of', $.week_end)"
 det["Evaluate"] = {"Type": "Parallel", "ResultPath": None, "End": True, "Branches": [
@@ -190,8 +190,8 @@ det["Evaluate"] = {"Type": "Parallel", "ResultPath": None, "End": True, "Branche
 
 S["Weekly"] = {"Type": "Parallel", "ResultPath": None, "Next": "ReadDecision", "Branches": [
     {"StartAt": "Part1", "States": tactics}, {"StartAt": "NewData?", "States": det}]}
-S["ReadDecision"] = get_json(f"models/bq2r/{NT}/decision_latest.json", "ReadDecisionReal", "$.decision")
-S["ReadDecisionReal"] = get_json(f"models/bq2r/{DS}/decision_latest.json", "Alert?", "$.decision_real")
+S["ReadDecision"] = get_json(f"{KEY}models/bq2r/{NT}/decision_latest.json", "ReadDecisionReal", "$.decision")
+S["ReadDecisionReal"] = get_json(f"{KEY}models/bq2r/{DS}/decision_latest.json", "Alert?", "$.decision_real")
 S["Alert?"] = {"Type": "Choice", "Choices": [
     {"Variable": "$.decision.v.alert", "BooleanEquals": True, "Next": "NotifyRetrain"},
     {"Variable": "$.decision_real.v.alert", "BooleanEquals": True, "Next": "NotifyRealAlert"}], "Default": "Advance"}

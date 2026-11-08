@@ -9,8 +9,9 @@ resource "aws_cloudwatch_log_group" "bq2_weekly_ibm" {
   retention_in_days = 90
 }
 
-# Extra S3 keys the HI-Large run reads and writes: its own week pointer (so it never moves SAML-D's) and the
-# per-week "already built" markers that let a re-run skip finished feature / scoring steps.
+# The HI-Large run keeps everything under s3://<bucket>/bq2_ibm/ (its own curated/, analytics/, models/, progress/,
+# jobs/), so the team's batch HI-Large and models/ are never touched. The Step Functions role needs its week pointer,
+# the per-week "already built" markers and the decision files there (the EMR job role already covers the bucket).
 resource "aws_iam_role_policy" "sfn_bq2_ibm" {
   name = "aml-sfn-bq2-ibm"
   role = aws_iam_role.sfn_bq2.id
@@ -19,7 +20,7 @@ resource "aws_iam_role_policy" "sfn_bq2_ibm" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["s3:GetObject", "s3:PutObject"]
-      Resource = ["arn:aws:s3:::${var.bucket}/progress/bq2_weekly_ibm.json", "arn:aws:s3:::${var.bucket}/progress/bq2/*"]
+      Resource = ["arn:aws:s3:::${var.bucket}/bq2_ibm/progress/*", "arn:aws:s3:::${var.bucket}/bq2_ibm/models/bq2r/*"]
     }]
   })
 }
