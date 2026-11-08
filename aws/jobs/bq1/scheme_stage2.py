@@ -204,73 +204,122 @@ def build_groups(nodes, payments):
     return gid, e
 
 
+CYCLE_BOUND = 12           # longest cycle measured (simple_cycles length_bound)
+
+
+def _longest_cycle(G):
+    """Longest simple cycle up to CYCLE_BOUND. Stops as soon as one of length CYCLE_BOUND is found
+    (nothing longer is ever counted), so the value is the same as max() over every cycle."""
+    best = 0
+    for c in nx.simple_cycles(G, length_bound=CYCLE_BOUND):
+        if len(c) > best:
+            best = len(c)
+            if best >= CYCLE_BOUND:
+                break
+    return best
+
+
+def _one_group(members, e):
+    """Feature rows (dicts with _idx) for one group: members = its nodes, e = its edges (or None)."""
+    accts = members["k"].unique()
+    G = nx.DiGraph()
+    G.add_nodes_from(accts)
+    if e is not None:
+        G.add_edges_from(zip(e["src"], e["dst"]))
+    n = G.number_of_nodes()
+    indeg, outdeg = dict(G.in_degree()), dict(G.out_degree())
+    src = [a for a in G if indeg[a] == 0 and outdeg[a] > 0]
+    snk = [a for a in G if outdeg[a] == 0 and indeg[a] > 0]
+    mid = [a for a in G if indeg[a] > 0 and outdeg[a] > 0]
+    has_cycle = not nx.is_directed_acyclic_graph(G)
+    longest, from_src, to_snk = 0, {}, {}
+    if not has_cycle and 1 < n <= MAX_PATH_NODES:
+        order = list(nx.topological_sort(G))
+        for a in order:                                  # longest path from any source
+            from_src[a] = max((from_src[p] + 1 for p in G.predecessors(a)), default=0)
+        for a in reversed(order):                        # longest path to any sink
+            to_snk[a] = max((to_snk[s] + 1 for s in G.successors(a)), default=0)
+        longest = max(from_src.values(), default=0)
+    elif has_cycle and n <= MAX_PATH_NODES:
+        longest = _longest_cycle(G) if n <= 200 else -1
+    m = G.number_of_edges()
+    recip = sum(1 for a, b in G.edges if G.has_edge(b, a)) / m if m else 0.0
+    if e is not None and len(e):
+        amt = np.log1p(e["amount_paid"].to_numpy())
+        amt_cv, n_pay = float(np.std(amt) / (np.mean(amt) + 1e-9)), len(e)
+        n_ccy, n_fmt = e["payment_currency"].nunique(), e["payment_format"].nunique()
+        span_h = (e["txn_time"].max() - e["txn_time"].min()).total_seconds() / 3600
+    else:
+        amt_cv = n_pay = n_ccy = n_fmt = span_h = 0
+    days = members["date"]
+    shape = {
+        "g_accounts": n, "g_nodes": len(members), "g_edges": m, "g_payments": n_pay,
+        "g_days": (max(days) - min(days)).days + 1,
+        "g_sources": len(src), "g_sinks": len(snk), "g_middles": len(mid),
+        "g_isolated": n - len(src) - len(snk) - len(mid),
+        "g_src_share": len(src) / n, "g_snk_share": len(snk) / n, "g_mid_share": len(mid) / n,
+        "g_max_in": max(indeg.values(), default=0), "g_max_out": max(outdeg.values(), default=0),
+        "g_max_in_share": max(indeg.values(), default=0) / n,
+        "g_max_out_share": max(outdeg.values(), default=0) / n,
+        "g_density": m / (n * (n - 1)) if n > 1 else 0.0,
+        "g_has_cycle": int(has_cycle), "g_longest": longest, "g_reciprocity": recip,
+        "g_amount_cv": amt_cv, "g_currencies": n_ccy, "g_formats": n_fmt,
+        "g_span_h": span_h, "g_pay_per_edge": n_pay / m if m else 0.0,
+    }
+    rows = []
+    for idx, a in zip(members.index, members["k"]):
+        i, o = indeg.get(a, 0), outdeg.get(a, 0)
+        preds, succs = list(G.predecessors(a)), list(G.successors(a))
+        rows.append({"_idx": idx, **shape,
+                     "r_in": i, "r_out": o, "r_in_share": i / n, "r_out_share": o / n,
+                     "r_role": 0 if i == 0 and o == 0 else (1 if i == 0 else (2 if o == 0 else 3)),
+                     "r_from_src": from_src.get(a, -1), "r_to_snk": to_snk.get(a, -1),
+                     "r_pred_out_avg": np.mean([outdeg[p] for p in preds]) if preds else 0.0,
+                     "r_succ_in_avg": np.mean([indeg[s] for s in succs]) if succs else 0.0,
+                     "r_hub": int(max(i, o) == max(shape["g_max_in"], shape["g_max_out"]) and max(i, o) > 1)})
+    return rows
+
+
+def _timed_group(task):
+    g, members, e = task
+    t0 = time.time()
+    rows = _one_group(members, e)
+    return g, len(members), time.time() - t0, rows
+
+
+def _workers():
+    """Cores this process may use (AML_GROUP_WORKERS overrides; 1 = no pool)."""
+    if os.environ.get("AML_GROUP_WORKERS"):
+        return max(1, int(os.environ["AML_GROUP_WORKERS"]))
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
+
+
 def group_features(nodes, gid, edges):
-    """One row per node: shape of its group + its role inside the group."""
+    """One row per node: shape of its group + its role inside the group.
+    Groups are independent, so they are measured in parallel worker processes (same values, any order)."""
     nodes = nodes.copy()
     nodes["gid"] = [gid[(k, d)] for k, d in zip(nodes["k"], nodes["date"])]
     edges = edges.copy()
     edges["gid"] = [gid[(s, d)] for s, d in zip(edges["src"], edges["date"])]
     eg = dict(tuple(edges.groupby("gid")))
-    rows = []
-    for g, members in nodes.groupby("gid"):
-        e = eg.get(g)
-        accts = members["k"].unique()
-        G = nx.DiGraph()
-        G.add_nodes_from(accts)
-        if e is not None:
-            G.add_edges_from(zip(e["src"], e["dst"]))
-        n = G.number_of_nodes()
-        indeg, outdeg = dict(G.in_degree()), dict(G.out_degree())
-        src = [a for a in G if indeg[a] == 0 and outdeg[a] > 0]
-        snk = [a for a in G if outdeg[a] == 0 and indeg[a] > 0]
-        mid = [a for a in G if indeg[a] > 0 and outdeg[a] > 0]
-        has_cycle = not nx.is_directed_acyclic_graph(G)
-        longest, from_src, to_snk = 0, {}, {}
-        if not has_cycle and 1 < n <= MAX_PATH_NODES:
-            order = list(nx.topological_sort(G))
-            for a in order:                                  # longest path from any source
-                from_src[a] = max((from_src[p] + 1 for p in G.predecessors(a)), default=0)
-            for a in reversed(order):                        # longest path to any sink
-                to_snk[a] = max((to_snk[s] + 1 for s in G.successors(a)), default=0)
-            longest = max(from_src.values(), default=0)
-        elif has_cycle and n <= MAX_PATH_NODES:
-            longest = max((len(c) for c in nx.simple_cycles(G, length_bound=12)), default=0) \
-                if n <= 200 else -1
-        m = G.number_of_edges()
-        recip = sum(1 for a, b in G.edges if G.has_edge(b, a)) / m if m else 0.0
-        if e is not None and len(e):
-            amt = np.log1p(e["amount_paid"].to_numpy())
-            amt_cv, n_pay = float(np.std(amt) / (np.mean(amt) + 1e-9)), len(e)
-            n_ccy, n_fmt = e["payment_currency"].nunique(), e["payment_format"].nunique()
-            span_h = (e["txn_time"].max() - e["txn_time"].min()).total_seconds() / 3600
-        else:
-            amt_cv = n_pay = n_ccy = n_fmt = span_h = 0
-        days = members["date"]
-        shape = {
-            "g_accounts": n, "g_nodes": len(members), "g_edges": m, "g_payments": n_pay,
-            "g_days": (max(days) - min(days)).days + 1,
-            "g_sources": len(src), "g_sinks": len(snk), "g_middles": len(mid),
-            "g_isolated": n - len(src) - len(snk) - len(mid),
-            "g_src_share": len(src) / n, "g_snk_share": len(snk) / n, "g_mid_share": len(mid) / n,
-            "g_max_in": max(indeg.values(), default=0), "g_max_out": max(outdeg.values(), default=0),
-            "g_max_in_share": max(indeg.values(), default=0) / n,
-            "g_max_out_share": max(outdeg.values(), default=0) / n,
-            "g_density": m / (n * (n - 1)) if n > 1 else 0.0,
-            "g_has_cycle": int(has_cycle), "g_longest": longest, "g_reciprocity": recip,
-            "g_amount_cv": amt_cv, "g_currencies": n_ccy, "g_formats": n_fmt,
-            "g_span_h": span_h, "g_pay_per_edge": n_pay / m if m else 0.0,
-        }
-        for idx, r in members.iterrows():
-            a = r["k"]
-            i, o = indeg.get(a, 0), outdeg.get(a, 0)
-            preds, succs = list(G.predecessors(a)), list(G.successors(a))
-            rows.append({"_idx": idx, **shape,
-                         "r_in": i, "r_out": o, "r_in_share": i / n, "r_out_share": o / n,
-                         "r_role": 0 if i == 0 and o == 0 else (1 if i == 0 else (2 if o == 0 else 3)),
-                         "r_from_src": from_src.get(a, -1), "r_to_snk": to_snk.get(a, -1),
-                         "r_pred_out_avg": np.mean([outdeg[p] for p in preds]) if preds else 0.0,
-                         "r_succ_in_avg": np.mean([indeg[s] for s in succs]) if succs else 0.0,
-                         "r_hub": int(max(i, o) == max(shape["g_max_in"], shape["g_max_out"]) and max(i, o) > 1)})
+    tasks = [(g, members, eg.get(g)) for g, members in nodes.groupby("gid")]
+    tasks.sort(key=lambda t: -(0 if t[2] is None else len(t[2])))   # big groups first: no long tail
+    workers = min(_workers(), len(tasks))
+    t0, done = time.time(), []
+    if workers > 1:
+        import multiprocessing as mp
+        ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else "spawn")
+        with ctx.Pool(workers) as pool:
+            done = list(pool.imap_unordered(_timed_group, tasks, chunksize=8))
+    else:
+        done = [_timed_group(t) for t in tasks]
+    slow = sorted(done, key=lambda d: -d[2])[:3]
+    print(f"[groups] {len(tasks)} groups on {workers} processes in {time.time() - t0:.0f}s; slowest: "
+          + ", ".join(f"{n} nodes {s:.0f}s" for _, n, s, _ in slow))
+    rows = [r for _, _, _, rs in done for r in rs]
     return pd.DataFrame(rows).set_index("_idx").loc[nodes.index]
 
 

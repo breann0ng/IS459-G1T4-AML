@@ -41,7 +41,8 @@
     "Plan": {
       "Type": "Pass",
       "Assign": {
-        "problems": "{% [ $not(($dataset != null)) ? 'dataset is missing', (($week != null) and $fromMillis($toMillis($week & 'T00:00:00Z'), '[F1]') != '1') ? 'week must be a Monday: ' & $week, ($is_saml and $not($dataset in ['SAML-R', 'SAML-C'])) ? 'SAML datasets are SAML-R (ramp) or SAML-C (control): ' & $dataset, ($is_saml and $week != null) ? 'SAML datasets are prepared whole (no week)' ] %}"
+        "problems": "{% [ $not(($dataset != null)) ? 'dataset is missing', (($week != null) and $fromMillis($toMillis($week & 'T00:00:00Z'), '[F1]') != '1') ? 'week must be a Monday: ' & $week, ($is_saml and $not($dataset in ['SAML-R', 'SAML-C'])) ? 'SAML datasets are SAML-R (ramp) or SAML-C (control): ' & $dataset, ($is_saml and $week != null) ? 'SAML datasets are prepared whole (no week)' ] %}",
+        "spark": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=16g --conf spark.driver.memoryOverhead=4g --conf spark.driver.maxResultSize=2g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=4g --conf spark.emr-serverless.executor.disk=100g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.sql.autoBroadcastJoinThreshold=-1' %}"
       },
       "Next": "ValidInput?"
     },
@@ -377,7 +378,7 @@
     },
     "FeaturesV2": {
       "Type": "Task",
-      "Comment": "Account-day graph features (rolling, fan-in/out, scatter-gather, cycles): curated/features_v2 (+ _sample). Sizing: 2-vCPU executors (11+5 GB), 10+4 GB driver (6+2 GB was killed in the cycles family); each feature family is checkpointed so the driver stays small (8 Nov fix).",
+      "Comment": "Account-day graph features (rolling, fan-in/out, scatter-gather, cycles): curated/features_v2 (+ _sample). Sizing: the shared $spark profile (the one aml_bq1_weekly ran every HI-Large-live week with): 4-vCPU executors (10+4 GB, up to 3), 16 GB driver with 8 GB overhead here; the old 2-vCPU / 10+4 GB-driver profile was killed (exit 137) on HI-Medium-live weeks (8 Nov). Each feature family is checkpointed so the driver stays small (8 Nov fix).",
       "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
       "Arguments": {
         "ApplicationId": "{% $app_id %}",
@@ -389,7 +390,7 @@
           "SparkSubmit": {
             "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/build_features_spark.py' %}",
             "EntryPointArguments": "{% ($week != null) ? [$dataset, $week, $week_end] : [$dataset] %}",
-            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1  --conf spark.driver.cores=2 --conf spark.driver.memory=10g --conf spark.driver.memoryOverhead=4g --conf spark.driver.extraJavaOptions=-Xlog:gc*:stdout:time,uptime --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=2 --conf spark.executor.memory=11g --conf spark.executor.memoryOverhead=5g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g --conf spark.emr-serverless.driver.disk=50g --conf spark.eventLog.logStageExecutorMetrics=true --conf spark.executor.processTreeMetrics.enabled=true --conf spark.executor.metrics.pollingInterval=5s --conf spark.eventLog.rotation.interval=60s' %}"
+            "SparkSubmitParameters": "{% $spark & ' --conf spark.driver.memoryOverhead=8g' %}"
           }
         },
         "ConfigurationOverrides": {
@@ -467,7 +468,7 @@
           "SparkSubmit": {
             "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/build_txn_features_spark.py' %}",
             "EntryPointArguments": "{% ($week != null) ? [$dataset, 'features_v2', $week, $week_end] : [$dataset, 'features_v2'] %}",
-            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=20g --conf spark.driver.memoryOverhead=2g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g --conf spark.emr-serverless.driver.disk=50g' %}"
+            "SparkSubmitParameters": "{% $spark %}"
           }
         },
         "ConfigurationOverrides": {
@@ -545,7 +546,7 @@
           "SparkSubmit": {
             "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/build_features_v3_spark.py' %}",
             "EntryPointArguments": "{% ($week != null) ? [$dataset, $week, $week_end] : [$dataset] %}",
-            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=20g --conf spark.driver.memoryOverhead=2g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g --conf spark.emr-serverless.driver.disk=50g' %}"
+            "SparkSubmitParameters": "{% $spark %}"
           }
         },
         "ConfigurationOverrides": {
