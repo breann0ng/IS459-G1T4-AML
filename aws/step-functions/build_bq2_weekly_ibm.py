@@ -33,7 +33,7 @@ ap.add_argument("--base-to", default="2022-09-11")
 ap.add_argument("--hide", default="fan_in,fan_out")        # the staged new tactic ...
 ap.add_argument("--intro", default="2022-10-03")           # ... appears on this day (Week 10)
 ap.add_argument("--label-lag-days", type=int, default=28)
-ap.add_argument("--max-executors", type=int, default=6)
+ap.add_argument("--max-executors", type=int, default=3)   # the team app is capped at 16 vCPU / 64 GB
 ap.add_argument("--out", default="aws/step-functions/aml_bq2_weekly_ibm.json")
 a = ap.parse_args()
 role = a.role_arn or f"arn:aws:iam::{a.account}:role/aml-emr-serverless-job"
