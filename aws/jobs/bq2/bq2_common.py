@@ -63,7 +63,7 @@ def group_of(pattern):
 
 
 # ---- storage helpers (plain pyarrow, so the laptop report needs neither train_txn.py nor Linux)
-ROOT = os.environ.get("AML_ROOT", "s3://pw-aml-g1t4")
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 ANALYTICS = f"{ROOT}/analytics"
 
 
@@ -94,6 +94,15 @@ def get_text(uri):
     fs, p = fs_path(uri)
     with fs.open_input_stream(p) as f:
         return f.read().decode()
+
+
+def deployed_info(dataset):
+    return get_json(f"{ROOT}/models/bq2r/{dataset}/deployed.json", default={"version": "v0"})
+
+
+def deployed_version(dataset):
+    """Model version scoring/monitoring uses: models/bq2r/<dataset>/deployed.json (v0 until a deploy)."""
+    return deployed_info(dataset)["version"]
 
 
 def get_json(uri, default=None):

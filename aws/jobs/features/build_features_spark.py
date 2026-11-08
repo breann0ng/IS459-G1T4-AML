@@ -75,8 +75,7 @@ from pyspark.sql.utils import AnalysisException
 
 
 # =============================================================================== SETTINGS
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")      # AML_ROOT is only for local testing
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
 

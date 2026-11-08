@@ -56,8 +56,7 @@ from pyspark import StorageLevel
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
 CHUNK_FROM = sys.argv[2] if len(sys.argv) > 2 else None    # optional chunk, inclusive dates
 CHUNK_TO = sys.argv[3] if len(sys.argv) > 3 else None      # (HI-Large: two weeks at a time)

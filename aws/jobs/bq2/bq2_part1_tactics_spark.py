@@ -48,8 +48,7 @@ from pyspark.sql import functions as F
 import math
 
 # =============================================================================== SETTINGS
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "SAML-R"
 BASE_FROM = sys.argv[2] if len(sys.argv) > 2 else "2022-10-03"
 BASE_TO = sys.argv[3] if len(sys.argv) > 3 else "2023-01-29"

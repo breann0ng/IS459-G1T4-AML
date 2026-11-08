@@ -35,8 +35,7 @@ from pyspark.sql import functions as F
 
 
 # =============================================================================== SETTINGS
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")      # AML_ROOT is only for local testing
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
 WEEK = sys.argv[2] if len(sys.argv) > 2 else None   # optional: Monday of the one weekly file to clean

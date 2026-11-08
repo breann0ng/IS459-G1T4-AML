@@ -63,8 +63,7 @@ import xxhash
 from sklearn.metrics import average_precision_score, precision_recall_curve
 
 # =============================================================================== SETTINGS
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 TRAIN_DATASETS = ["HI-Small", "HI-Medium"]
 TEST_DATASET = "HI-Large"
 VALIDATION_SHARE = 0.25
