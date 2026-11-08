@@ -36,6 +36,8 @@ ap.add_argument("--label-lag-days", type=int, default=28)
 ap.add_argument("--max-executors", type=int, default=3)   # the team app is capped at 16 vCPU / 64 GB
 ap.add_argument("--models", default="all=models/bq2_ibm/final,nofan=models/bq2_ibm/final_nofan",
                 help="BQ1 model and the one that never saw the hidden patterns (kept apart from the team's models/)")
+ap.add_argument("--jobs-prefix", default="jobs_bq2_ibm",
+                help="where this branch's scripts + jobs.zip are deployed (AML_JOBS_PREFIX for deploy.sh); venv stays in jobs/")
 ap.add_argument("--out", default="aws/step-functions/aml_bq2_weekly_ibm.json")
 a = ap.parse_args()
 role = a.role_arn or f"arn:aws:iam::{a.account}:role/aml-emr-serverless-job"
@@ -75,12 +77,12 @@ EMERGE_ENV = {"BQ2_EMERGING": a.hide, "BQ2_FIRST_DOSE": a.intro}
 def conf(c, env=None):
     extra = [f"spark.emr-serverless.driverEnv.{k}={v}" for k, v in (env or {}).items()] + \
             [f"spark.executorEnv.{k}={v}" for k, v in (env or {}).items()]
-    return f"--py-files {ROOT}/jobs/jobs.zip " + " ".join(f"--conf {x}" for x in c + extra)
+    return f"--py-files {ROOT}/{a.jobs_prefix}/jobs.zip " + " ".join(f"--conf {x}" for x in c + extra)
 
 
 def emr(name, script, args, nxt, python_only=False, env=None, minutes=60, **extra):
     """Run one EMR Serverless job and wait for it (.sync). `args` is an ASL intrinsic or a list of constants."""
-    drv = {"EntryPoint": f"{ROOT}/jobs/{script}",
+    drv = {"EntryPoint": f"{ROOT}/{a.jobs_prefix}/{script}",
            "SparkSubmitParameters": conf(PYONLY if python_only else SPARK, env)}
     if isinstance(args, str):
         drv["EntryPointArguments.$"] = args
