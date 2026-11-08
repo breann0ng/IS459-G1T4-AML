@@ -12,7 +12,7 @@ it and run the same command again.
     python local/runs/run_final_serverless.py --list                   step names, done or not
 
 Before the first run (see the steps in local/runs/README.md):
-    raw/ has HI-Small, HI-Medium, HI-Large       (aws/jobs/load/load_kaggle.sh, in CloudShell)
+    raw/ has HI-Small, HI-Medium, HI-Large       (aws/jobs/prepare/load_kaggle.sh, in CloudShell)
     jobs/jobs.zip + entry scripts                (aws/deploy/deploy.sh, from main)
     jobs/venv.tar.gz                             (aws/deploy/build_venv.sh, needs Docker)
 
@@ -86,10 +86,13 @@ def steps(score_from, score_to):
     return s
 
 
-def spark_params(kind, bucket):
+def spark_params(kind, bucket, code="jobs", run="final"):
     env = "./environment/bin/python"
     conf = {
-        "spark.archives": f"s3://{bucket}/jobs/venv.tar.gz#environment",
+        "spark.archives": f"s3://{bucket}/jobs/venv.tar.gz#environment",   # the shared Python environment
+        # a named run keeps its own models/<run>/ and analytics/final_<run>_* (models/final/ stays the team's)
+        "spark.emr-serverless.driverEnv.AML_FINAL_RUN": run,
+        "spark.executorEnv.AML_FINAL_RUN": run,
         "spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON": env,
         "spark.emr-serverless.driverEnv.PYSPARK_PYTHON": env,
         "spark.executorEnv.PYSPARK_PYTHON": env,
@@ -100,16 +103,16 @@ def spark_params(kind, bucket):
         "spark.executorEnv.AWS_REGION": REGION,
         **(SPARK if kind == "spark" else DRIVER_ONLY),
     }
-    return f"--py-files s3://{bucket}/jobs/jobs.zip " + " ".join(f"--conf {k}={v}" for k, v in conf.items())
+    return f"--py-files s3://{bucket}/{code}/jobs.zip " + " ".join(f"--conf {k}={v}" for k, v in conf.items())
 
 
-def job_request(name, kind, cmd, bucket, role_arn):
+def job_request(name, kind, cmd, bucket, role_arn, code="jobs", run="final"):
     script, *args = shlex.split(cmd)
     return {
-        "applicationId": APP_ID, "executionRoleArn": role_arn, "name": f"aml-{name}",
-        "jobDriver": {"sparkSubmit": {"entryPoint": f"s3://{bucket}/jobs/{script}",
+        "applicationId": APP_ID, "executionRoleArn": role_arn, "name": f"aml-{run}-{name}",
+        "jobDriver": {"sparkSubmit": {"entryPoint": f"s3://{bucket}/{code}/{script}",
                                       "entryPointArguments": args,
-                                      "sparkSubmitParameters": spark_params(kind, bucket)}},
+                                      "sparkSubmitParameters": spark_params(kind, bucket, code, run)}},
         "configurationOverrides": {"monitoringConfiguration": {
             "s3MonitoringConfiguration": {"logUri": f"s3://{bucket}/logs/emr_serverless/"}}},
         "executionTimeoutMinutes": 600,
@@ -127,8 +130,20 @@ def main():
     ap.add_argument("--until", help="stop after this step")
     ap.add_argument("--score-from", help="score only these dates (default: every HI-Large day)")
     ap.add_argument("--score-to")
+    ap.add_argument("--code-prefix", default="jobs",
+                    help="where the code is in the bucket: jobs (the team's, from main) or e.g. dev/enrui/jobs "
+                         "(your branch, uploaded by local/runs/deploy_branch.py)")
+    ap.add_argument("--run-name", default="final",
+                    help="final = the team's models/final/; any other name keeps its own models/<name>/ and "
+                         "analytics/final_<name>_* tables (and its own progress markers)")
+    ap.add_argument("--stage-days", nargs=3, metavar=("DATASET", "FROM", "TO"),
+                    help="only stage one CSV per day for the daily simulation (split_days_spark.py), e.g. "
+                         "HI-Large 2022-09-12 2022-09-25")
     a = ap.parse_args()
     plan = steps(a.score_from, a.score_to)
+    if a.stage_days:
+        ds_, f_, t_ = a.stage_days
+        plan = [(f"split_{ds_}_{f_}_{t_}", "spark", f"split_days_spark.py {ds_} {f_} {t_}")]
     names = [n for n, _, _ in plan]
     for x in (a.only, a.until):
         if x and x not in names:
@@ -138,7 +153,7 @@ def main():
         for n, k, c in plan:
             if a.only and n != a.only:
                 continue
-            r = job_request(n, k, c, a.bucket, f"arn:aws:iam::<account>:role/{JOB_ROLE}")
+            r = job_request(n, k, c, a.bucket, f"arn:aws:iam::<account>:role/{JOB_ROLE}", a.code_prefix, a.run_name)
             print(f"--- {n} [{k}]\n    {r['jobDriver']['sparkSubmit']['entryPoint']} "
                   f"{' '.join(r['jobDriver']['sparkSubmit']['entryPointArguments'])}")
             if n == names[0] or a.only:
@@ -151,7 +166,8 @@ def main():
     sess = boto3.Session(profile_name=a.profile, region_name=REGION)
     s3, emr = sess.client("s3"), sess.client("emr-serverless")
     role_arn = f"arn:aws:iam::{sess.client('sts').get_caller_identity()['Account']}:role/{JOB_ROLE}"
-    marker = lambda n: f"progress/serverless/{n}.done"
+    marker = lambda n: (f"progress/serverless/{n}.done" if a.run_name == "final"
+                        else f"progress/serverless/{a.run_name}/{n}.done")
 
     def done(n):
         try:
@@ -176,12 +192,12 @@ def main():
         # laptop slept / window closed mid-run: re-attach to that job instead of starting it twice
         live = [j for p in emr.get_paginator("list_job_runs").paginate(
                     applicationId=APP_ID, states=["SUBMITTED", "PENDING", "SCHEDULED", "RUNNING", "SUCCESS"])
-                for j in p["jobRuns"] if j["name"] == f"aml-{n}"] if not a.only else []
+                for j in p["jobRuns"] if j["name"] == f"aml-{a.run_name}-{n}"] if not a.only else []
         if live:
             run_id = max(live, key=lambda j: j["createdAt"])["id"]
             print(f"=== {time.strftime('%m-%d %H:%M')} attach {n}  ({run_id}, already submitted)", flush=True)
         else:
-            run_id = emr.start_job_run(**job_request(n, k, c, a.bucket, role_arn))["jobRunId"]
+            run_id = emr.start_job_run(**job_request(n, k, c, a.bucket, role_arn, a.code_prefix, a.run_name))["jobRunId"]
             print(f"=== {time.strftime('%m-%d %H:%M')} start {n}  ({run_id})", flush=True)
         state = None
         while state not in ("SUCCESS", "FAILED", "CANCELLED"):
@@ -205,8 +221,8 @@ def main():
     if a.only or a.until:
         print(f"=== stopped as asked ({(time.time() - t0) / 60:.0f} min)")
         return
-    print(f"=== ALL DONE in {(time.time() - t0) / 3600:.1f} h. Laptop: "
-          f"AML_ROOT=s3://{a.bucket} python local/reports/final_report.py HI-Large > results/final/final_report.txt")
+    print(f"=== ALL DONE in {(time.time() - t0) / 3600:.1f} h. Laptop: AML_ROOT=s3://{a.bucket} "
+          f"AML_FINAL_RUN={a.run_name} python local/reports/final_report.py HI-Large > results/final/final_report.txt")
 
 
 if __name__ == "__main__":

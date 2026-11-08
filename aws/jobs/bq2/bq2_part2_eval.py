@@ -39,8 +39,15 @@ import pyarrow.dataset as ds
 import bq2_common as C
 import train_txn as T
 
+AS_OF = None                                                   # --as-of YYYY-MM-DD: grade only what is known by then
+if "--as-of" in sys.argv:
+    i = sys.argv.index("--as-of")
+    AS_OF = date.fromisoformat(sys.argv[i + 1])
+    del sys.argv[i:i + 2]
 DATASET = sys.argv[1] if len(sys.argv) > 1 else C.RAMP
-VERSION = sys.argv[2] if len(sys.argv) > 2 else "v0"          # the model being monitored
+VERSION = sys.argv[2] if len(sys.argv) > 2 else "v0"          # the model being monitored ("deployed" = the pointer)
+if VERSION == "deployed":
+    VERSION = C.deployed_version(DATASET)
 NEXT = f"v{int(VERSION[1:]) + 1}"                              # the model its alert would train
 SUFFIX = "" if VERSION == "v0" else f"_{VERSION}"              # round-1 tables keep their names
 
@@ -56,6 +63,11 @@ def load_scores():
     sc["week_start"] = (sc["date"] - pd.to_timedelta(sc["date"].dt.weekday, unit="D")).dt.strftime("%Y-%m-%d")
     sc["group"] = [C.group_of(p) for p in sc["pattern_label"]]
     sc["label"], sc["alert"] = sc["label"].astype(bool), sc["alert"].astype(bool)
+    if AS_OF:                      # a week's cases are confirmed LABEL_LAG_DAYS after the week ends
+        known = sc["date"] + pd.to_timedelta(6 - sc["date"].dt.weekday + C.LABEL_LAG_DAYS, unit="D")
+        sc = sc[known <= pd.Timestamp(AS_OF)]
+        if sc.empty:
+            return None
     return sc
 
 
@@ -152,9 +164,16 @@ def main():
     mroot = f"{T.ROOT}/models/bq2r/{DATASET}"
     meta = C.get_json(f"{mroot}/{VERSION}/meta.json")
     sc = load_scores()
+    if sc is None or sc[sc["version"] == VERSION].empty:    # the first weeks, or a model deployed too recently to be graded
+        C.put_text(f"{mroot}/decision_latest.json", json.dumps(
+            {"dataset": DATASET, "monitored": VERSION, "alert": False, "as_of": str(AS_OF),
+             "note": "no confirmed cases yet"}))
+        print(f"[eval] no confirmed case for {VERSION} as of {AS_OF}: no alert")
+        return
     wk, rw = weekly(sc), rules(sc, meta)
     dec = decide(rw, meta)
     C.put_text(f"{mroot}/decision{SUFFIX}.json", json.dumps(dec, indent=1))
+    C.put_text(f"{mroot}/decision_latest.json", json.dumps({**dec, "as_of": str(AS_OF) if AS_OF else None}))   # fixed key for Step Functions
     ty = typology_table(sc[sc["version"].isin([VERSION, NEXT])], dec)
     save(wk, "bq2r_part2_weekly")
     save(rw.assign(version=VERSION), f"bq2r_part2_rules{SUFFIX}")
@@ -172,12 +191,15 @@ def main():
         print(rw[rw["any_rule"]][["week_start", "r1_recall_drop", "r2_new_typology", "r3_typology_drop"]]
               .to_string(index=False))
         print(f"\n[eval] decision: {json.dumps(dec)}")
-        if NEXT in set(sc["version"]) and dec.get("deploy_from"):
+        if NEXT in set(sc["version"]) and dec.get("deploy_from") and (sc["date"] >= pd.Timestamp(dec["deploy_from"])).any():
             d = dec["deploy_from"]
             both = sc[(sc["date"] >= pd.Timestamp(d)) & sc["version"].isin([VERSION, NEXT])]
+            if both.empty:      # deployed after the last scored day (e.g. HI-Large): nothing to compare yet
+                print(f"\n[eval] recovery: {NEXT} would go live on {d}, after the last scored day")
+                return
             cmp = (both[both["label"]].groupby(["version", "group"])["alert"].mean().unstack("group"))
-            cmp["precision"] = both.groupby("version").apply(
-                lambda g: (g["alert"] & g["label"]).sum() / max(g["alert"].sum(), 1))
+            cmp["precision"] = pd.Series({v: (g["alert"] & g["label"]).sum() / max(g["alert"].sum(), 1)
+                                          for v, g in both.groupby("version")})
             print(f"\n[eval] recovery: {VERSION} vs {NEXT} on the same weeks, from {d}")
             print(cmp.round(3).to_string())
             print(ty[ty["period"] == "after deploy"].pivot_table(index=["group", "typology"], columns="version",

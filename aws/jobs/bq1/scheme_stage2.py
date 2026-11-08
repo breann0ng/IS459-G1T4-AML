@@ -42,6 +42,7 @@ Writes  analytics/scheme_stage2/      per class precision / recall / F1, per mod
 import argparse
 import json
 import os
+import re
 import time
 from collections import defaultdict
 
@@ -56,8 +57,7 @@ from lightgbm import LGBMClassifier
 from sklearn.utils.class_weight import compute_sample_weight
 
 # =============================================================================== SETTINGS
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")      # AML_ROOT is only for local testing
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 PATTERNS = ["fan_in", "fan_out", "gather_scatter", "scatter_gather", "cycle",
             "bipartite", "stack", "random"]
 LINK_DAYS = 2              # same account on days this close = same group
@@ -70,6 +70,25 @@ BATCH_SIZE = 200_000
 
 META = ["dataset", "week", "acct_bank", "acct", "date", "label", "first_laundering_ts",
         "pattern_label"]
+
+
+# AML_DROP_FEATURES: leave feature columns out of every model (detector and namer) in one place.
+# A preset name or a regex; unset = all features (the default). "fan_windows" = the 9 sliding
+# fan-in / fan-out / gather-scatter windows (s_/r_ prefixed in the detector, bare in the namer):
+# on validation they changed account-day F1 by less than the seed-to-seed noise (8 Nov 2026).
+DROP_PRESETS = {"fan_windows": r"(^|_)(fanin|fanout|gs)_max_\d+d$"}
+
+
+def drop_features(cols):
+    name = os.environ.get("AML_DROP_FEATURES", "").strip()
+    if not name:
+        return list(cols)
+    rx = DROP_PRESETS.get(name, name)
+    dropped = [c for c in cols if re.search(rx, c)]
+    print(f"[features] AML_DROP_FEATURES={name}: dropped {len(dropped)}: {', '.join(dropped)}", flush=True)
+    return [c for c in cols if c not in dropped]
+
+
 CURATED, ANALYTICS = f"{ROOT}/curated", f"{ROOT}/analytics"
 RUN_AT = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 RUN_ID = time.strftime("%Y%m%d%H%M%S", time.gmtime())
@@ -114,10 +133,11 @@ def load_table(name, flt=None):
                       schema=schema).to_table(filter=flt).to_pandas()
 
 
-def write_results(df, name, config):
+def write_results(df, name, config, extra_parts=()):
+    """extra_parts: more string partition columns already in df (e.g. run_date for daily runs)."""
     fs, path = fs_path(f"{ANALYTICS}/{name}")
     df = df.assign(config=config)
-    part = ds.partitioning(pa.schema([("dataset", pa.string()), ("config", pa.string())]),
+    part = ds.partitioning(pa.schema([(c, pa.string()) for c in ("dataset", "config", *extra_parts)]),
                            flavor="hive")
     ds.write_dataset(pa.Table.from_pandas(df, preserve_index=False), path, filesystem=fs,
                      format="parquet", partitioning=part,

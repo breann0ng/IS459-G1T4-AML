@@ -388,7 +388,7 @@ def main():
         filter=ds.field("dataset").isin(list(train_end)) & (ds.field("label") == 1)).to_pandas()
     smp["date"] = pd.to_datetime(smp["date"]).dt.date
     smp = smp[[dt_ <= train_end[d] for d, dt_ in zip(smp["dataset"], smp["date"])]].reset_index(drop=True)
-    feat = [c for c in smp.columns if c not in META]
+    feat = S.drop_features([c for c in smp.columns if c not in META])
     pays = context_for(smp) if a.context else S.payments_for(smp)
     copies = []
     for i, keep in enumerate(KEEP_RATES):

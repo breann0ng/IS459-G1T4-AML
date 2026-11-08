@@ -1,0 +1,537 @@
+{
+  "Comment": "AML BQ1 training pipeline. Started by hand (rarely): {} or {\"train_datasets\": [\"HI-Small\", \"HI-Medium\"], \"code_prefix\": \"dev/joey/jobs\"}. Cleans the training sets in parallel (aml_prepare), builds their features, trains stage 1 (threshold on validation) and the stage 2 namer, freezes both into models/bq1-<timestamp>/, and promotes it to models/bq1_champion.json ONLY if the quality gate passes (else SNS, the old champion stays). Never reads or scores HI-Large. Run log: s3://is459-g1t4-aml/progress/bq1/train/<execution>.json. Optional: \"drop_features\": \"fan_windows\" leaves the 9 fan-in/fan-out/gather-scatter window features out of the detector and the namer (configs get a _fan_windows suffix).",
+  "QueryLanguage": "JSONata",
+  "StartAt": "ParseInput",
+  "States": {
+    "ParseInput": {
+      "Type": "Pass",
+      "Assign": {
+        "in": "{% $states.input %}"
+      },
+      "Next": "Setup"
+    },
+    "Setup": {
+      "Type": "Pass",
+      "Assign": {
+        "parallel": "{% $exists($in.parallel) ? $in.parallel : 3 %}",
+        "force": "{% $exists($in.force) ? $in.force : false %}",
+        "app_id": "{% $exists($in.app_id) ? $in.app_id : '00ga4hfa252ojr09' %}",
+        "code": "{% $exists($in.code_prefix) ? $in.code_prefix : 'jobs' %}",
+        "topic": "arn:aws:sns:us-east-1:390402569482:aml-bq1-alerts",
+        "champion": null,
+        "champion_run": null,
+        "steps": [],
+        "failed_step": null,
+        "error": null,
+        "train_datasets": "{% $exists($in.train_datasets) ? $in.train_datasets : ['HI-Small', 'HI-Medium'] %}",
+        "stage1_config": "{% $exists($in.drop_features) and $in.drop_features != '' ? 'txn_v3m_xp_' & $in.drop_features : 'txn_v3m_xp' %}",
+        "stage2_config": "{% $exists($in.drop_features) and $in.drop_features != '' ? 'enrui_breann_mld20_' & $in.drop_features : 'enrui_breann_mld20' %}",
+        "model_run": "{% 'bq1-' & $fromMillis($millis(), '[Y0001][M01][D01]-[H01][m01]') %}",
+        "log_key": "{% 'progress/bq1/train/' & $states.context.Execution.Name & '.json' %}",
+        "gate": null,
+        "drop_features": "{% $exists($in.drop_features) ? $in.drop_features : '' %}"
+      },
+      "Next": "LogStart"
+    },
+    "LogStart": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $log_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'train_datasets': $train_datasets, 'model_run': $model_run, 'previous_champion': $champion_run, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING'} %}"
+      },
+      "Next": "ReadChampion",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "ReadChampion": {
+      "Type": "Task",
+      "Comment": "The model in production: models/bq1_champion.json -> {run: <models/ folder>}.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% 'models/bq1_champion.json' %}"
+      },
+      "Assign": {
+        "champion": "{% ( $p := $parse($states.result.Body); $type($p) = 'string' ? $parse($p) : $p ) %}",
+        "champion_run": "{% (( $p := $parse($states.result.Body); $type($p) = 'string' ? $parse($p) : $p )).run %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "S3.NoSuchKeyException"
+          ],
+          "Next": "CleanTrainingData",
+          "Assign": {
+            "champion": null
+          }
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "champion",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "CleanTrainingData"
+    },
+    "CleanTrainingData": {
+      "Type": "Map",
+      "Comment": "Clean HI-Small and HI-Medium at the same time (5 vCPU each).",
+      "Items": "{% $train_datasets %}",
+      "MaxConcurrency": "{% $parallel %}",
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "CleanTrainingDataItem",
+        "States": {
+          "CleanTrainingDataItem": {
+            "Type": "Task",
+            "Comment": "Clean only (no patterns, no features).",
+            "Resource": "arn:aws:states:::states:startExecution.sync:2",
+            "Arguments": {
+              "StateMachineArn": "arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare",
+              "Input": "{% $merge([{'dataset': $states.input, 'features': false, 'check_previous': false, 'force': $force}, {'app_id': $app_id, 'code_prefix': $code, 'AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID': $states.context.Execution.Id}]) %}"
+            },
+            "Output": "{% $states.result.Output %}",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "CleanTrainingDataItemFailed",
+                "Output": "{% {'error': $states.errorOutput} %}"
+              }
+            ],
+            "End": true
+          },
+          "CleanTrainingDataItemFailed": {
+            "Type": "Fail",
+            "Error": "CleanFailed",
+            "Cause": "{% $string($states.input) %}"
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "CleanTrainingData",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "PrepareTrainingData"
+    },
+    "PrepareTrainingData": {
+      "Type": "Map",
+      "Comment": "Patterns + features of each training dataset (already cleaned). 1 at a time: a features job takes the whole 16 vCPU cap.",
+      "Items": "{% $train_datasets %}",
+      "MaxConcurrency": 1,
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "PrepareTrainingDataItem",
+        "States": {
+          "PrepareTrainingDataItem": {
+            "Type": "Task",
+            "Comment": "Patterns -> features (the clean is cached).",
+            "Resource": "arn:aws:states:::states:startExecution.sync:2",
+            "Arguments": {
+              "StateMachineArn": "arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare",
+              "Input": "{% $merge([{'dataset': $states.input, 'check_previous': false, 'force_features': $force}, {'app_id': $app_id, 'code_prefix': $code, 'AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID': $states.context.Execution.Id}]) %}"
+            },
+            "Output": "{% $states.result.Output %}",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "PrepareTrainingDataItemFailed",
+                "Output": "{% {'error': $states.errorOutput} %}"
+              }
+            ],
+            "End": true
+          },
+          "PrepareTrainingDataItemFailed": {
+            "Type": "Fail",
+            "Error": "PrepareFailed",
+            "Cause": "{% $string($states.input) %}"
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "PrepareTrainingData",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "TrainDetector"
+    },
+    "TrainDetector": {
+      "Type": "Task",
+      "Comment": "Stage 1 recipe on the first 75% of days of the training sets, validated on the last 25%: picks the alert threshold (best validation F1) and alert expansion. analytics/txn_results.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-bq1-train-detector-' & $model_run %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 240,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/train_txn.py' %}",
+            "EntryPointArguments": "{% ['--txn-table', 'txn_features_v3', '--stage2-features', 'features_v3', '--preset', 'p3', '--merge-layering', '--expand', 'auto', '--config', $stage1_config, '--train-datasets', $join($train_datasets, ',')] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=8 --conf spark.driver.memory=48g --conf spark.emr-serverless.driver.disk=100g --conf spark.dynamicAllocation.initialExecutors=0 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1 --conf spark.executor.instances=1' & ($drop_features != '' ? ' --conf spark.emr-serverless.driverEnv.AML_DROP_FEATURES=' & $drop_features : '') %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'TrainDetector', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "TrainDetector",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "TrainNamer"
+    },
+    "TrainNamer": {
+      "Type": "Task",
+      "Comment": "Stage 2 recipe: group namer (context, group vote, 20-day linking), validated on the same split.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-bq1-train-namer-' & $model_run %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 240,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/group_stage2.py' %}",
+            "EntryPointArguments": "{% [$stage1_config, '--link-days', '3', '--param', 'n_estimators=800', '--param', 'learning_rate=0.03', '--keep-rates', '1,0.7,0.5,0.3', '--context', '--group-vote', '--max-linked-days', '20', '--out-config', $stage2_config] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=8 --conf spark.driver.memory=48g --conf spark.emr-serverless.driver.disk=100g --conf spark.dynamicAllocation.initialExecutors=0 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1 --conf spark.executor.instances=1' & ($drop_features != '' ? ' --conf spark.emr-serverless.driverEnv.AML_DROP_FEATURES=' & $drop_features : '') %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'TrainNamer', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "TrainNamer",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "FinalTrain"
+    },
+    "FinalTrain": {
+      "Type": "Task",
+      "Comment": "Freeze stage 1 + namer with the validated settings -> models/<model_run>/ (stage1.txt, namer_group.txt, meta.json).",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-bq1-final-train-' & $model_run %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 180,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/final_train.py' %}",
+            "EntryPointArguments": "{% [$stage1_config, $stage2_config & '_grp'] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=8 --conf spark.driver.memory=48g --conf spark.emr-serverless.driver.disk=100g --conf spark.dynamicAllocation.initialExecutors=0 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1 --conf spark.executor.instances=1' & ' --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=' & $model_run & ($drop_features != '' ? ' --conf spark.emr-serverless.driverEnv.AML_DROP_FEATURES=' & $drop_features : '') %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'FinalTrain', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "FinalTrain",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "QualityGate"
+    },
+    "QualityGate": {
+      "Type": "Task",
+      "Comment": "Precision / F1 on validation vs the rules and vs the champion -> models/<model_run>/gate.json.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-bq1-gate-' & $model_run %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 30,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/bq1_checks.py' %}",
+            "EntryPointArguments": "{% ['gate', $stage1_config, $model_run] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=2 --conf spark.driver.memory=8g --conf spark.dynamicAllocation.initialExecutors=0 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1 --conf spark.executor.instances=1' & ($drop_features != '' ? ' --conf spark.emr-serverless.driverEnv.AML_DROP_FEATURES=' & $drop_features : '') %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'QualityGate', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "QualityGate",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "ReadGate"
+    },
+    "ReadGate": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% 'models/' & $model_run & '/gate.json' %}"
+      },
+      "Assign": {
+        "gate": "{% ( $p := $parse($states.result.Body); $type($p) = 'string' ? $parse($p) : $p ) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "ReadGate",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "GatePassed?"
+    },
+    "GatePassed?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $gate.passed %}",
+          "Next": "Promote"
+        }
+      ],
+      "Default": "NotifyRejected"
+    },
+    "Promote": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% 'models/bq1_champion.json' %}",
+        "ContentType": "application/json",
+        "Body": "{% {'run': $model_run, 'previous': $champion_run, 'metrics': $gate.metrics, 'promoted_at': $now(), 'execution': $states.context.Execution.Id} %}"
+      },
+      "Next": "LogSuccess",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "Promote",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "NotifyRejected": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "{% $topic %}",
+        "Subject": "{% 'AML BQ1: new model ' & $model_run & ' rejected by the quality gate' %}",
+        "Message": "{% $string($gate) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogSuccess"
+        }
+      ],
+      "Next": "LogSuccess"
+    },
+    "LogSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $log_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'train_datasets': $train_datasets, 'model_run': $model_run, 'previous_champion': $champion_run, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': ($gate.passed ? 'PROMOTED' : 'REJECTED'), 'gate': $gate, 'steps': $steps, 'finished_at': $now()} %}"
+      },
+      "Next": "Done",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "Done": {
+      "Type": "Succeed"
+    },
+    "LogFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $log_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'train_datasets': $train_datasets, 'model_run': $model_run, 'previous_champion': $champion_run, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'FAILED', 'failed_step': $failed_step, 'error': $error, 'steps': $steps, 'finished_at': $now()} %}"
+      },
+      "Next": "Failed",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $failed_step ? $failed_step : 'BQ1Failed' %}",
+      "Cause": "{% $string($error) %}"
+    }
+  }
+}

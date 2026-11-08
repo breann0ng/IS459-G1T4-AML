@@ -1,0 +1,580 @@
+{
+  "Comment": "AML BQ1 scoring pipeline, with the champion model (models/bq1_champion.json; never trains). One week (what the DataPrepared event sends): {\"dataset\": \"HI-Large-live\", \"week\": \"2022-09-12\"}. Backfill: {\"dataset\": \"HI-Large-live\", \"first_week\": \"2022-08-22\", \"score_from\": \"2022-09-12\", \"last_week\": \"2022-09-19\"} (weeks before score_from are cleaned only, for the 21-day look-back). Optional: capacity (analyst alerts/day), min_week_precision, parallel, app_id, code_prefix. Run log: s3://is459-g1t4-aml/progress/bq1/score/<execution>.json; results summary: progress/bq1/score/<execution>/results.json.",
+  "QueryLanguage": "JSONata",
+  "StartAt": "ParseInput",
+  "States": {
+    "ParseInput": {
+      "Type": "Pass",
+      "Comment": "By hand, or the DataPrepared event of aml_prepare (detail = dataset + week).",
+      "Assign": {
+        "in": "{% $exists($states.input.detail.dataset) ? {'dataset': $states.input.detail.dataset, 'week': $states.input.detail.week, 'code_prefix': $states.input.detail.code_prefix, 'app_id': $states.input.detail.app_id} : $states.input %}"
+      },
+      "Next": "Setup"
+    },
+    "Setup": {
+      "Type": "Pass",
+      "Comment": "capacity = alerts/day the analyst team can review (a business number: change it here).",
+      "Assign": {
+        "parallel": "{% $exists($in.parallel) ? $in.parallel : 3 %}",
+        "force": "{% $exists($in.force) ? $in.force : false %}",
+        "app_id": "{% $exists($in.app_id) ? $in.app_id : '00ga4hfa252ojr09' %}",
+        "code": "{% $exists($in.code_prefix) ? $in.code_prefix : 'jobs' %}",
+        "topic": "arn:aws:sns:us-east-1:390402569482:aml-bq1-alerts",
+        "champion": null,
+        "champion_run": null,
+        "steps": [],
+        "failed_step": null,
+        "error": null,
+        "dataset": "{% $exists($in.dataset) ? $in.dataset : null %}",
+        "first_week": "{% $exists($in.first_week) ? $in.first_week : ($exists($in.week) ? $in.week : null) %}",
+        "score_from": "{% $exists($in.score_from) ? $in.score_from : ($exists($in.first_week) ? $in.first_week : ($exists($in.week) ? $in.week : null)) %}",
+        "last_week": "{% $exists($in.last_week) ? $in.last_week : ($exists($in.week) ? $in.week : ($exists($in.first_week) ? $in.first_week : null)) %}",
+        "first_is_start": "{% $exists($in.first_week) %}",
+        "capacity": "{% $exists($in.capacity) ? $in.capacity : 2500 %}",
+        "min_week_precision": "{% $exists($in.min_week_precision) ? $in.min_week_precision : 0.7 %}",
+        "log_key": "{% 'progress/bq1/score/' & $states.context.Execution.Name & '.json' %}",
+        "results_key": "{% 'progress/bq1/score/' & $states.context.Execution.Name & '/results.json' %}",
+        "weeks_out": [],
+        "results": null,
+        "v2_profile": "{% $exists($in.v2_profile) ? $in.v2_profile = true : false %}"
+      },
+      "Next": "Plan"
+    },
+    "Plan": {
+      "Type": "Pass",
+      "Assign": {
+        "weeks": "{% ($first_week != null) ? $append([], [0..$round(($toMillis($last_week & 'T00:00:00Z') - $toMillis($first_week & 'T00:00:00Z')) / 604800000)].( $s := $toMillis($first_week & 'T00:00:00Z') + $ * 604800000; $w := $fromMillis($s, '[Y0001]-[M01]-[D01]'); {'week': $w, 'week_end': $fromMillis($s + 6 * 86400000, '[Y0001]-[M01]-[D01]'), 'score': $w >= $score_from, 'first': $ = 0 and $first_is_start} )) : [] %}",
+        "problems": "{% [ ($dataset = null) ? 'dataset is missing', ($first_week = null) ? 'week (or first_week) is missing', (($first_week != null) and ($fromMillis($toMillis($first_week & 'T00:00:00Z'), '[F1]') != '1' or $fromMillis($toMillis($score_from & 'T00:00:00Z'), '[F1]') != '1' or $fromMillis($toMillis($last_week & 'T00:00:00Z'), '[F1]') != '1')) ? 'weeks must be Mondays', (($first_week != null) and ($first_week > $score_from or $score_from > $last_week)) ? 'need first_week <= score_from <= last_week', ($dataset in ['HI-Small', 'HI-Medium']) ? 'never score a training dataset (' & $dataset & ')', ( $base := $match($dataset, /^HI-(Small|Medium|Large)/).match; $ds := $lookup({'HI-Small': '2022-08-29', 'HI-Medium': '2022-08-29', 'HI-Large': '2022-08-01'}, $base); $h := ($score_from != null) ? $fromMillis($toMillis($score_from & 'T00:00:00Z') - 21 * 86400000, '[Y0001]-[M01]-[D01]') : null; $need := ($exists($ds) and $ds > $h) ? $ds : $h; ($first_is_start and ($need != null) and $first_week > $need) ? 'first_week must be ' & $need & ' or earlier: the features of ' & $score_from & ' read 21 days of history (or start at the first week of the data)' ) ] %}"
+      },
+      "Next": "ValidInput?"
+    },
+    "ValidInput?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $count($problems) = 0 %}",
+          "Next": "LogStart"
+        }
+      ],
+      "Default": "BadInput"
+    },
+    "BadInput": {
+      "Type": "Fail",
+      "Error": "BadInput",
+      "Cause": "{% $join($problems, '; ') %}"
+    },
+    "LogStart": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $log_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'dataset': $dataset, 'first_week': $first_week, 'score_from': $score_from, 'last_week': $last_week, 'champion': $champion_run, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING'} %}"
+      },
+      "Next": "ReadChampion",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "ReadChampion": {
+      "Type": "Task",
+      "Comment": "The model in production: models/bq1_champion.json -> {run: <models/ folder>}.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% 'models/bq1_champion.json' %}"
+      },
+      "Assign": {
+        "champion": "{% ( $p := $parse($states.result.Body); $type($p) = 'string' ? $parse($p) : $p ) %}",
+        "champion_run": "{% (( $p := $parse($states.result.Body); $type($p) = 'string' ? $parse($p) : $p )).run %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "S3.NoSuchKeyException"
+          ],
+          "Next": "HaveChampion?",
+          "Assign": {
+            "champion": null
+          }
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "champion",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "HaveChampion?"
+    },
+    "HaveChampion?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $champion_run != null %}",
+          "Next": "CleanWeeks"
+        }
+      ],
+      "Default": "NoChampion"
+    },
+    "NoChampion": {
+      "Type": "Pass",
+      "Assign": {
+        "failed_step": "ReadChampion",
+        "error": {
+          "Error": "NoChampion",
+          "Cause": "models/bq1_champion.json is missing: run aml_bq1_train first"
+        }
+      },
+      "Next": "LogFailure"
+    },
+    "CleanWeeks": {
+      "Type": "Map",
+      "Comment": "Clean every week of the run, history and scored, $parallel at a time. Weeks already cleaned (by the S3 trigger, BQ2 or an earlier run) return at once.",
+      "Items": "{% $weeks %}",
+      "MaxConcurrency": "{% $parallel %}",
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "CleanWeeksItem",
+        "States": {
+          "CleanWeeksItem": {
+            "Type": "Task",
+            "Comment": "Clean only (no patterns, no features).",
+            "Resource": "arn:aws:states:::states:startExecution.sync:2",
+            "Arguments": {
+              "StateMachineArn": "arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare",
+              "Input": "{% $merge([{'dataset': $dataset, 'week': $states.input.week, 'features': false, 'check_previous': false, 'force': $force}, {'app_id': $app_id, 'code_prefix': $code, 'AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID': $states.context.Execution.Id}]) %}"
+            },
+            "Output": "{% $states.result.Output %}",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "CleanWeeksItemFailed",
+                "Output": "{% {'error': $states.errorOutput} %}"
+              }
+            ],
+            "End": true
+          },
+          "CleanWeeksItemFailed": {
+            "Type": "Fail",
+            "Error": "CleanFailed",
+            "Cause": "{% $string($states.input) %}"
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "CleanWeeks",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "ScoreWeeks"
+    },
+    "ScoreWeeks": {
+      "Type": "Map",
+      "Comment": "Scored weeks only, oldest first, one at a time: features read the earlier weeks' cleaned payments, the namer links back to earlier weeks' alerts, and a features or score job takes the whole 16 vCPU cap.",
+      "Items": "{% $append([], $filter($weeks, function($w) { $w.score })) %}",
+      "MaxConcurrency": 1,
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "PrepareWeek",
+        "States": {
+          "PrepareWeek": {
+            "Type": "Task",
+            "Comment": "aml_prepare for this week: already cleaned by CleanWeeks, so this runs patterns + features only (or returns at once if BQ2 or the S3 trigger already did).",
+            "Resource": "arn:aws:states:::states:startExecution.sync:2",
+            "Arguments": {
+              "StateMachineArn": "arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare",
+              "Input": "{% $merge([{'dataset': $dataset, 'week': $states.input.week, 'features': $states.input.score, 'check_previous': $not($states.input.first), 'force_features': $force, 'v2_profile': $v2_profile}, {'app_id': $app_id, 'code_prefix': $code, 'AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID': $states.context.Execution.Id}]) %}"
+            },
+            "Output": "{% $states.input %}",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "WeekFailed",
+                "Output": "{% {'error': $states.errorOutput} %}"
+              }
+            ],
+            "Next": "Score",
+            "Assign": {
+              "prep": "{% $states.result.Output %}"
+            }
+          },
+          "Score": {
+            "Type": "Task",
+            "Comment": "Stage 1: the champion model gives every payment a probability; alerts above the frozen threshold (+ alert expansion) -> analytics/live_* (run_date = the Monday).",
+            "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+            "Arguments": {
+              "ApplicationId": "{% $app_id %}",
+              "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+              "Name": "{% 'aml-bq1-score-' & $dataset & '-' & $states.input.week %}",
+              "ClientToken": "{% $uuid() %}",
+              "ExecutionTimeoutMinutes": 120,
+              "JobDriver": {
+                "SparkSubmit": {
+                  "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/score_final_spark.py' %}",
+                  "EntryPointArguments": "{% [$dataset, $states.input.week, $states.input.week_end] %}",
+                  "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=20g --conf spark.driver.memoryOverhead=2g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g --conf spark.emr-serverless.driver.disk=50g' & ' --conf spark.emr-serverless.driverEnv.AML_RUN_DATE=' & $states.input.week & ' --conf spark.executorEnv.AML_RUN_DATE=' & $states.input.week & ' --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=' & $champion_run & ' --conf spark.executorEnv.AML_FINAL_RUN=' & $champion_run %}"
+                }
+              },
+              "ConfigurationOverrides": {
+                "MonitoringConfiguration": {
+                  "S3MonitoringConfiguration": {
+                    "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+                  }
+                }
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed",
+                  "States.Timeout"
+                ],
+                "IntervalSeconds": 300,
+                "MaxAttempts": 1,
+                "BackoffRate": 2
+              }
+            ],
+            "Output": "{% $states.input %}",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "WeekFailed",
+                "Output": "{% {'week': $states.input.week, 'step': 'Score', 'error': $states.errorOutput} %}"
+              }
+            ],
+            "Next": "Name"
+          },
+          "Name": {
+            "Type": "Task",
+            "Comment": "Stage 2: group each alert with linked alerts (up to 20 days back) and name the pattern -> the analyst list.",
+            "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+            "Arguments": {
+              "ApplicationId": "{% $app_id %}",
+              "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+              "Name": "{% 'aml-bq1-name-' & $dataset & '-' & $states.input.week %}",
+              "ClientToken": "{% $uuid() %}",
+              "ExecutionTimeoutMinutes": 90,
+              "JobDriver": {
+                "SparkSubmit": {
+                  "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/final_group_namer.py' %}",
+                  "EntryPointArguments": "{% [$dataset] %}",
+                  "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=8 --conf spark.driver.memory=48g --conf spark.emr-serverless.driver.disk=100g --conf spark.dynamicAllocation.initialExecutors=0 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1 --conf spark.executor.instances=1' & ' --conf spark.emr-serverless.driverEnv.AML_RUN_DATE=' & $states.input.week & ' --conf spark.emr-serverless.driverEnv.AML_RUN_TO=' & $states.input.week_end & ' --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=' & $champion_run %}"
+                }
+              },
+              "ConfigurationOverrides": {
+                "MonitoringConfiguration": {
+                  "S3MonitoringConfiguration": {
+                    "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+                  }
+                }
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed",
+                  "States.Timeout"
+                ],
+                "IntervalSeconds": 300,
+                "MaxAttempts": 1,
+                "BackoffRate": 2
+              }
+            ],
+            "Output": "{% $states.input %}",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "WeekFailed",
+                "Output": "{% {'week': $states.input.week, 'step': 'Name', 'error': $states.errorOutput} %}"
+              }
+            ],
+            "Next": "WeekCheck"
+          },
+          "WeekCheck": {
+            "Type": "Task",
+            "Comment": "Analyst workload check: alerts/day vs capacity, precision -> progress/bq1/<dataset>/<week>/check.json.",
+            "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+            "Arguments": {
+              "ApplicationId": "{% $app_id %}",
+              "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+              "Name": "{% 'aml-bq1-check-' & $dataset & '-' & $states.input.week %}",
+              "ClientToken": "{% $uuid() %}",
+              "ExecutionTimeoutMinutes": 30,
+              "JobDriver": {
+                "SparkSubmit": {
+                  "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/bq1_checks.py' %}",
+                  "EntryPointArguments": "{% ['week', $dataset, $states.input.week, '--capacity', $string($capacity), '--min-precision', $string($min_week_precision)] %}",
+                  "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=2 --conf spark.driver.memory=8g --conf spark.dynamicAllocation.initialExecutors=0 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1' & ' --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=' & $champion_run %}"
+                }
+              },
+              "ConfigurationOverrides": {
+                "MonitoringConfiguration": {
+                  "S3MonitoringConfiguration": {
+                    "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+                  }
+                }
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed",
+                  "States.Timeout"
+                ],
+                "IntervalSeconds": 300,
+                "MaxAttempts": 1,
+                "BackoffRate": 2
+              }
+            ],
+            "Output": "{% $states.input %}",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "WeekFailed",
+                "Output": "{% {'week': $states.input.week, 'step': 'WeekCheck', 'error': $states.errorOutput} %}"
+              }
+            ],
+            "Next": "ReadWeekCheck"
+          },
+          "ReadWeekCheck": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+            "Arguments": {
+              "Bucket": "is459-g1t4-aml",
+              "Key": "{% 'progress/bq1/' & $dataset & '/' & $states.input.week & '/check.json' %}"
+            },
+            "Output": "{% $merge([$states.input, {'check': ( $p := $parse($states.result.Body); $type($p) = 'string' ? $parse($p) : $p )}]) %}",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "WeekFailed",
+                "Output": "{% {'week': $states.input.week, 'step': 'ReadWeekCheck', 'error': $states.errorOutput} %}"
+              }
+            ],
+            "Next": "Manageable?"
+          },
+          "Manageable?": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Condition": "{% $states.input.check.notify %}",
+                "Next": "NotifyAnalystLoad"
+              }
+            ],
+            "Default": "WeekDone"
+          },
+          "NotifyAnalystLoad": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sns:publish",
+            "Arguments": {
+              "TopicArn": "{% $topic %}",
+              "Subject": "{% 'AML BQ1: alert queue needs attention, ' & $dataset & ' week ' & $states.input.week %}",
+              "Message": "{% $string($states.input.check) %}"
+            },
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "WeekDone",
+                "Output": "{% $states.input %}"
+              }
+            ],
+            "Next": "WeekDone",
+            "Output": "{% $states.input %}"
+          },
+          "WeekDone": {
+            "Type": "Pass",
+            "Output": "{% {'week': $states.input.week, 'scored': true, 'check': $states.input.check} %}",
+            "End": true
+          },
+          "WeekFailed": {
+            "Type": "Fail",
+            "Error": "WeekFailed",
+            "Cause": "{% $string($states.input) %}"
+          }
+        }
+      },
+      "Assign": {
+        "weeks_out": "{% $states.result %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "ScoreWeeks",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "Summary"
+    },
+    "Summary": {
+      "Type": "Task",
+      "Comment": "Results of this run over its scored weeks (precision, recall, F1, alerts/day, per pattern, stage 2 naming) -> progress/bq1/score/<execution>/results.json.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-bq1-summary-' & $dataset %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 30,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/bq1_checks.py' %}",
+            "EntryPointArguments": "{% ['summary', $dataset, $join($append([], $filter($weeks, function($w) { $w.score })).week, ','), $results_key] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=2 --conf spark.driver.memory=8g --conf spark.dynamicAllocation.initialExecutors=0 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1' & ' --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=' & $champion_run %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'Summary', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogSuccess",
+          "Assign": {
+            "results": "{% {'error': $states.errorOutput} %}"
+          }
+        }
+      ],
+      "Next": "ReadSummary"
+    },
+    "ReadSummary": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $results_key %}"
+      },
+      "Assign": {
+        "results": "{% ( $p := $parse($states.result.Body); $type($p) = 'string' ? $parse($p) : $p ) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogSuccess",
+          "Assign": {
+            "results": "{% {'error': $states.errorOutput} %}"
+          }
+        }
+      ],
+      "Next": "LogSuccess"
+    },
+    "LogSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $log_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'dataset': $dataset, 'first_week': $first_week, 'score_from': $score_from, 'last_week': $last_week, 'champion': $champion_run, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'SUCCEEDED', 'weeks': $weeks_out, 'results': $results, 'steps': $steps, 'finished_at': $now()} %}"
+      },
+      "Next": "Done",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "Done": {
+      "Type": "Succeed"
+    },
+    "LogFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $log_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'dataset': $dataset, 'first_week': $first_week, 'score_from': $score_from, 'last_week': $last_week, 'champion': $champion_run, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'FAILED', 'failed_step': $failed_step, 'error': $error, 'steps': $steps, 'finished_at': $now()} %}"
+      },
+      "Next": "Failed",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $failed_step ? $failed_step : 'BQ1Failed' %}",
+      "Cause": "{% $string($error) %}"
+    }
+  }
+}

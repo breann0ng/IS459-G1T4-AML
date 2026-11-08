@@ -78,7 +78,7 @@ def main():
     keep = [c for c in sd.schema.names if c not in ("txn_id", "s_id", "r_id", "week", "pattern_label")]
     smp = sd.to_table(columns=keep, filter=ds.field("dataset").isin(T.TRAIN_DATASETS)).to_pandas()
     smp["date"] = pd.to_datetime(smp["date"]).dt.date
-    feat = [c for c in smp.columns if c not in T.META]
+    feat = T.drop_features([c for c in smp.columns if c not in T.META])
     m = np.zeros(len(smp), dtype=bool)
     for d, end in train_end.items():
         m |= (smp["dataset"] == d).to_numpy() & (smp["date"] <= end).to_numpy()
@@ -97,7 +97,7 @@ def main():
         filter=ds.field("dataset").isin(list(train_end)) & (ds.field("label") == 1)).to_pandas()
     a["date"] = pd.to_datetime(a["date"]).dt.date
     a = a[[dt_ <= train_end[d] for d, dt_ in zip(a["dataset"], a["date"])]].reset_index(drop=True)
-    f2 = [c for c in a.columns if c not in S.META]
+    f2 = S.drop_features([c for c in a.columns if c not in S.META])
     pays = G.context_for(a) if st["context"] else S.payments_for(a)
     copies = []
     for i, k in enumerate(G.KEEP_RATES):

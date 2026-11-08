@@ -3,10 +3,12 @@ clean_transactions_spark.py
 Step 1 of BQ1: raw transaction CSV  ->  clean, typed Parquet.
 
 Run (on the EMR master node):
-    spark-submit clean_transactions_spark.py HI-Small
+    spark-submit clean_transactions_spark.py HI-Small                     whole dataset (batch)
+    spark-submit clean_transactions_spark.py HI-Large-live 2022-09-12     one weekly file (aml_bq1_weekly)
 
 Reads
     raw/transactions/set=<DATASET>/*.csv          the Kaggle *_Trans.csv file
+    raw/transactions/set=<DATASET>/week=<WEEK>/   with WEEK: only that week's file (from replay_week.py)
 Writes (Parquet, partitioned by dataset and week; re-running a dataset replaces it)
     curated/transactions/   clean rows the features are built from (no label)
     curated/labels/         txn_id + is_laundering, used only for training and grading
@@ -18,23 +20,44 @@ Notes
     * Every column is read as text first, so account IDs can never be turned into numbers.
     * Bank IDs are cast to integers ("010" -> 10). Bank and account stay separate columns.
     * Amounts keep 8 decimal places, so small Bitcoin payments are not rounded to 0.
-    * Weeks are Monday-to-Sunday; week 1 is the week of the earliest transaction.
+    * Weeks are Monday-to-Sunday; week 1 is the week of the earliest transaction. A weekly run
+      only sees one week, so it counts from the dataset's FIRST_DAY instead (same numbers as batch).
+    * A replay dataset (HI-Large-live, HI-Medium-joey) is a weekly replay of a Kaggle set and uses
+      its settings (the base name is the HI-Small / HI-Medium / HI-Large at the start of the name).
     * txn_id = SHA-256 of the cleaned values. parse_patterns_spark.py uses the same recipe.
 """
 
 import os
+import re
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 
 
 # =============================================================================== SETTINGS
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")      # AML_ROOT is only for local testing
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
+WEEK = sys.argv[2] if len(sys.argv) > 2 else None   # optional: Monday of the one weekly file to clean
+# Replays use their Kaggle set's settings: HI-Large-live, HI-Medium-joey -> HI-Large, HI-Medium
+_base = re.match(r"HI-(Small|Medium|Large)", DATASET)
+BASE = _base.group(0) if _base else DATASET
+
+# First day of each dataset (from the Kaggle files): weekly runs number weeks from its Monday,
+# so week N means the same dates in a weekly run and a whole-dataset run.
+FIRST_DAY = {
+    "HI-Small": "2022-09-01",
+    "HI-Medium": "2022-09-01",
+    "HI-Large": "2022-08-01",
+}
+
+# Daily mode (Step Functions aml-daily): clean the week of AML_RUN_DATE so far, from the day folders
+# raw/transactions/set=<DATASET>/date=YYYY-MM-DD/ (Monday to that day), and rewrite only that week.
+# Week numbers stay those of the full clean (week 1 is read from curated/transactions).
+# Neither WEEK nor AML_RUN_DATE = the whole dataset, as before.
+RUN_DATE = None if WEEK else os.environ.get("AML_RUN_DATE")   # the weekly argument wins
 
 # Drop the end of a dataset where normal activity collapses (see curated/daily_profile).
 # Format "YYYY-MM-DD HH:MM"; None keeps everything. Set it per dataset after the first run.
@@ -48,6 +71,14 @@ ALLOWED_FORMATS = ["ACH", "Bitcoin", "Cash", "Cheque", "Credit Card", "Reinvestm
 # =========================================================================================
 
 RAW_PATH = f"{ROOT}/raw/transactions/set={DATASET}/"
+if WEEK:
+    if BASE not in FIRST_DAY:
+        raise SystemExit(f"Weekly clean needs FIRST_DAY for {BASE} (else every week would be week 1)")
+    RAW_PATH = f"{RAW_PATH}week={WEEK}/"
+elif RUN_DATE:
+    _d = date.fromisoformat(RUN_DATE)
+    _days = [(_d - timedelta(days=i)).isoformat() for i in range(_d.weekday(), -1, -1)]   # Monday .. day
+    RAW_PATH = f"{RAW_PATH}date={{{','.join(_days)}}}/"
 OUT = f"{ROOT}/curated"
 AMOUNT_TYPE = "decimal(28,8)"   # 8 decimals: Bitcoin amounts are tiny (e.g. 0.00843)
 RUN_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -57,7 +88,15 @@ RAW_COLS = ["ts_raw", "from_bank_raw", "from_account", "to_bank_raw", "to_accoun
             "amount_received_raw", "receiving_currency", "amount_paid_raw",
             "payment_currency", "payment_format", "is_laundering_raw"]
 
-spark = SparkSession.builder.appName(f"CleanTransactions-{DATASET}").getOrCreate()
+spark = SparkSession.builder.appName(f"CleanTransactions-{DATASET}{'-' + WEEK if WEEK else ''}").getOrCreate()
+
+
+def rebalance(df, *cols):
+    """REBALANCE hint in SQL form: works on Spark 3.2+ (EMR 7, local 3.5) and 4.x (EMR Serverless 8).
+    df.hint("rebalance", "col", ...) only works on Spark 4 (3.5 passes the names as strings and fails)."""
+    view = f"_rebalance_{id(df)}"
+    df.createOrReplaceTempView(view)
+    return spark.sql(f"SELECT /*+ REBALANCE({', '.join(cols)}) */ * FROM {view}")
 spark.sparkContext.setLogLevel("WARN")      # keep logs small: warnings and errors only
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
@@ -100,9 +139,24 @@ def parse(df):
         .withColumn("is_laundering", F.col("is_laundering_raw").cast("int")))
 
 
+def first_week_start(df, week_start):
+    """Monday of week 1. Weekly mode: the dataset's FIRST_DAY (the file holds one week, so its own
+    minimum is not week 1). Daily mode: from the full clean, so a week-to-date run keeps its week number."""
+    if WEEK:
+        return spark.range(1).select(F.to_date(F.date_trunc("week", F.lit(FIRST_DAY[BASE])))).first()[0]
+    if RUN_DATE:
+        w1 = (spark.read.parquet(f"{OUT}/transactions")
+                   .filter((F.col("dataset") == DATASET) & (F.col("week") == 1))
+                   .select(F.min(F.to_date(F.date_trunc("week", "txn_time")))).first()[0])
+        if w1 is None:
+            raise SystemExit(f"daily mode needs the full clean of {DATASET} first (curated/transactions week 1)")
+        return w1
+    return df.select(F.min(week_start)).first()[0]
+
+
 def add_week(df):
     week_start = F.to_date(F.date_trunc("week", "txn_time"))
-    first_week = df.select(F.min(week_start)).first()[0]
+    first_week = first_week_start(df, week_start)
     week = F.floor(F.datediff(week_start, F.lit(first_week)) / 7) + 1
     return df.withColumn("week", F.coalesce(week.cast("int"), F.lit(0)))
 
@@ -122,7 +176,7 @@ def reject_reason():
          .when(blank("payment_currency") | blank("receiving_currency"), "MISSING_CURRENCY")
          .when(~F.col("payment_format").isin(ALLOWED_FORMATS), "UNKNOWN_FORMAT")
          .when(~F.coalesce(F.col("is_laundering").isin(0, 1), F.lit(False)), "BAD_LABEL"))
-    cutoff = MAX_TIMESTAMP.get(DATASET)
+    cutoff = MAX_TIMESTAMP.get(BASE)
     if cutoff:
         after = F.col("txn_time") > F.to_timestamp(F.lit(cutoff), "yyyy-MM-dd HH:mm")
         reason = F.when(F.col("txn_time").isNotNull() & after, "AFTER_CUTOFF").otherwise(reason)
@@ -132,7 +186,7 @@ def reject_reason():
 def write(df, name, partitions=("dataset", "week")):
     # Rebalance, not repartition: one task per WEEK left most cores idle while writing;
     # rebalance lets AQE split big weeks across tasks and merge small ones.
-    df = df.hint("rebalance", *partitions)
+    df = rebalance(df, *partitions)
     if "txn_time" in df.columns:
         df = df.sortWithinPartitions("txn_time")
     df.write.mode("overwrite").partitionBy(*partitions).parquet(f"{OUT}/{name}")
@@ -218,7 +272,7 @@ def main():
 
     n_raw, n_q = df.count(), quarantine.count()
     n_clean = clean.count()
-    print(f"[clean] {DATASET}: raw={n_raw} quarantined={n_q} "
+    print(f"[clean] {DATASET}{' week ' + WEEK if WEEK else ''}: raw={n_raw} quarantined={n_q} "
           f"duplicates_removed={n_raw - n_q - n_clean} clean={n_clean}")
     print("[clean] daily profile (look for the day normal volume collapses):")
     daily_profile.orderBy("txn_date").show(60, truncate=False)

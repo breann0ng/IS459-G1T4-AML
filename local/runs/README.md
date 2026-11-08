@@ -9,7 +9,7 @@ It does no data work itself; it is the stop-gap until `aws/step-functions/` runs
 git clone https://github.com/<org>/IS459-G1T4-AML.git && cd IS459-G1T4-AML   # main
 # 1. raw data: upload kaggle.json (Actions > Upload file), then
 mkdir -p ~/.kaggle && mv ~/kaggle.json ~/.kaggle/
-AML_BUCKET=is459-g1t4-aml bash aws/jobs/load/load_kaggle.sh HI-Medium HI-Large   # HI-Small is already there
+AML_BUCKET=is459-g1t4-aml bash aws/jobs/prepare/load_kaggle.sh HI-Medium HI-Large   # HI-Small is already there
 # 2. code: entry scripts + jobs.zip
 sudo dnf install -y zip && AML_BUCKET=is459-g1t4-aml bash aws/deploy/deploy.sh
 # 3. libraries: venv.tar.gz (check with Breann first, she may have built it)

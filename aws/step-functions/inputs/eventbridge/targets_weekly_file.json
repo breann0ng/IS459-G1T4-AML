@@ -1,0 +1,9 @@
+[{
+  "Id": "aml-prepare",
+  "Arn": "arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare",
+  "RoleArn": "arn:aws:iam::390402569482:role/aml-events-pipeline",
+  "InputTransformer": {
+    "InputPathsMap": {"key": "$.detail.object.key"},
+    "InputTemplate": "{\"detail\": {\"object\": {\"key\": <key>}}}"
+  }
+}]

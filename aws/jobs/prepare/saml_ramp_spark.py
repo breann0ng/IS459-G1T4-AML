@@ -48,8 +48,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 # =============================================================================== SETTINGS
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 SRC = f"{ROOT}/raw/saml/SAML-D.csv"
 import os as _os, sys as _sys                # repo layout: bq2_common.py is in aws/jobs/bq2/
 _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "bq2"))

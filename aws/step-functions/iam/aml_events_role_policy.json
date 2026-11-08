@@ -1,0 +1,12 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "StartPipelines",
+    "Effect": "Allow",
+    "Action": "states:StartExecution",
+    "Resource": [
+      "arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare",
+      "arn:aws:states:us-east-1:390402569482:stateMachine:aml_bq1_score"
+    ]
+  }]
+}

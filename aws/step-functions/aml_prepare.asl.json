@@ -1,0 +1,773 @@
+{
+  "Comment": "AML shared data stage, used by BQ1 (training + weekly scoring) and BQ2. One dataset, either whole (training sets) or one week (a weekly bank file): clean, then (when features are wanted) parse patterns -> features (features_v2, txn_features, features_v3 in one job). Idempotent: a marker in s3://is459-g1t4-aml/progress/prepare/<dataset>/<week|full>.json records what is done, so a second caller (BQ1 and BQ2 both asking for the same week) returns at once. Input: {\"dataset\": \"HI-Large-live\", \"week\": \"2022-09-12\"} or {\"dataset\": \"HI-Small\"} (whole file). Optional: features (default true; false = clean only, for history weeks), force, check_previous (default true in week mode), emit (default false: publish a DataPrepared event for BQ1/BQ2 when done), app_id, code_prefix. Also accepts an EventBridge S3 'Object Created' event for raw/transactions/set=<dataset>/week=<Monday>/_SUCCESS. SAML: {\"dataset\": \"SAML-R\"} or \"SAML-C\" (whole only); SAML-D is converted to the IBM layout first when raw/ has none yet (convert: true forces it; one conversion writes both).",
+  "QueryLanguage": "JSONata",
+  "StartAt": "ParseInput",
+  "States": {
+    "ParseInput": {
+      "Type": "Pass",
+      "Comment": "Input by hand / from BQ1, or an S3 event (the key gives dataset and week; S3 events emit).",
+      "Assign": {
+        "in": "{% $exists($states.input.detail.object.key) ? ( $k := $states.input.detail.object.key; {'dataset': $match($k, /set=([^\\/]+)/).groups[0], 'week': $match($k, /week=([0-9-]+)/).groups[0], 'emit': true, 'code_prefix': $states.input.code_prefix, 'app_id': $states.input.app_id} ) : $states.input %}"
+      },
+      "Next": "Setup"
+    },
+    "Setup": {
+      "Type": "Pass",
+      "Assign": {
+        "dataset": "{% $exists($in.dataset) ? $in.dataset : null %}",
+        "week": "{% $exists($in.week) ? $in.week : null %}",
+        "week_end": "{% $exists($in.week) ? $fromMillis($toMillis($in.week & 'T00:00:00Z') + 6 * 86400000, '[Y0001]-[M01]-[D01]') : null %}",
+        "prev_week": "{% $exists($in.week) ? $fromMillis($toMillis($in.week & 'T00:00:00Z') - 7 * 86400000, '[Y0001]-[M01]-[D01]') : null %}",
+        "features": "{% $exists($in.features) ? $in.features : true %}",
+        "force": "{% $exists($in.force) ? $in.force : false %}",
+        "force_features": "{% $exists($in.force_features) ? $in.force_features : false %}",
+        "check_previous": "{% $exists($in.check_previous) ? $in.check_previous : $exists($in.week) %}",
+        "emit": "{% $exists($in.emit) ? $in.emit : false %}",
+        "app_id": "{% $exists($in.app_id) ? $in.app_id : '00ga4hfa252ojr09' %}",
+        "code": "{% $exists($in.code_prefix) ? $in.code_prefix : 'jobs' %}",
+        "marker_key": "{% 'progress/prepare/' & $in.dataset & '/' & ($exists($in.week) ? $in.week : 'full') & '.json' %}",
+        "steps": [],
+        "failed_step": null,
+        "error": null,
+        "done": null,
+        "prev": null,
+        "checked": false,
+        "v2_profile": "{% $exists($in.v2_profile) ? $in.v2_profile = true : false %}",
+        "convert": "{% $exists($in.convert) ? $in.convert : false %}",
+        "is_saml": "{% $exists($in.dataset) ? $substring($in.dataset, 0, 5) = 'SAML-' : false %}"
+      },
+      "Next": "Plan"
+    },
+    "Plan": {
+      "Type": "Pass",
+      "Assign": {
+        "problems": "{% [ $not(($dataset != null)) ? 'dataset is missing', (($week != null) and $fromMillis($toMillis($week & 'T00:00:00Z'), '[F1]') != '1') ? 'week must be a Monday: ' & $week, ($is_saml and $not($dataset in ['SAML-R', 'SAML-C'])) ? 'SAML datasets are SAML-R (ramp) or SAML-C (control): ' & $dataset, ($is_saml and $week != null) ? 'SAML datasets are prepared whole (no week)' ] %}"
+      },
+      "Next": "ValidInput?"
+    },
+    "ValidInput?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $count($problems) = 0 %}",
+          "Next": "ReadMarker"
+        }
+      ],
+      "Default": "BadInput"
+    },
+    "BadInput": {
+      "Type": "Fail",
+      "Error": "BadInput",
+      "Cause": "{% $join($problems, '; ') %}"
+    },
+    "ReadMarker": {
+      "Type": "Task",
+      "Comment": "What earlier runs already did for this dataset/week.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $marker_key %}"
+      },
+      "Assign": {
+        "done": "{% ( $p := $parse($states.result.Body); $type($p) = 'string' ? $parse($p) : $p ) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "S3.NoSuchKeyException"
+          ],
+          "Next": "AlreadyDone?",
+          "Assign": {
+            "done": null
+          }
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "done",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "AlreadyDone?"
+    },
+    "AlreadyDone?": {
+      "Type": "Choice",
+      "Comment": "Skip what is done (unless force). Cleaned before but features now wanted -> features only.",
+      "Choices": [
+        {
+          "Condition": "{% $done.status = 'RUNNING' and $not($force) and $not($checked) %}",
+          "Next": "StillRunning"
+        },
+        {
+          "Condition": "{% $done.status = 'RUNNING' and $not($force) %}",
+          "Next": "InProgress"
+        },
+        {
+          "Condition": "{% $done.cleaned = true and ($done.features = true or $not($features)) and $not($force) and $not($features and $force_features) %}",
+          "Next": "Emit?"
+        },
+        {
+          "Condition": "{% $done.cleaned = true and $not($force) %}",
+          "Next": "LogStartFeatures"
+        },
+        {
+          "Condition": "{% $check_previous %}",
+          "Next": "ReadPrevious"
+        }
+      ],
+      "Default": "LogStart"
+    },
+    "StillRunning": {
+      "Type": "Task",
+      "Comment": "The marker says RUNNING. Ask Step Functions whether that execution really still runs: a run that was stopped or crashed leaves RUNNING behind, and must not block the week forever.",
+      "Resource": "arn:aws:states:::aws-sdk:sfn:describeExecution",
+      "Arguments": {
+        "ExecutionArn": "{% $done.execution %}"
+      },
+      "Assign": {
+        "checked": true,
+        "done": "{% $states.result.Status = 'RUNNING' ? $done : $merge([$done, {'status': 'STALE'}]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "AlreadyDone?",
+          "Assign": {
+            "checked": true,
+            "done": "{% $merge([$done, {'status': 'STALE'}]) %}"
+          }
+        }
+      ],
+      "Next": "AlreadyDone?"
+    },
+    "InProgress": {
+      "Type": "Fail",
+      "Error": "AlreadyRunning",
+      "Cause": "{% 'another execution is preparing ' & $marker_key & ': ' & $done.execution %}"
+    },
+    "ReadPrevious": {
+      "Type": "Task",
+      "Comment": "A week's features read 21 days back, so the previous week must be cleaned first.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% 'progress/prepare/' & $dataset & '/' & $prev_week & '.json' %}"
+      },
+      "Assign": {
+        "prev": "{% ( $p := $parse($states.result.Body); $type($p) = 'string' ? $parse($p) : $p ) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "S3.NoSuchKeyException"
+          ],
+          "Next": "PreviousCleaned?",
+          "Assign": {
+            "prev": null
+          }
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "prev",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "PreviousCleaned?"
+    },
+    "PreviousCleaned?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $prev.cleaned = true %}",
+          "Next": "LogStart"
+        }
+      ],
+      "Default": "PreviousMissing"
+    },
+    "PreviousMissing": {
+      "Type": "Fail",
+      "Error": "PreviousWeekNotPrepared",
+      "Cause": "{% 'week ' & $prev_week & ' of ' & $dataset & ' is not cleaned yet; prepare it first (or pass check_previous: false for the first week of a dataset)' %}"
+    },
+    "LogStart": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $marker_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': false, 'features': false} %}"
+      },
+      "Next": "Saml?",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "LogStartFeatures": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $marker_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': true, 'features': false} %}"
+      },
+      "Next": "ParsePatterns",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "Clean": {
+      "Type": "Task",
+      "Comment": "Raw CSV -> curated/transactions, labels, quarantine, dq_report (one week or the whole file).",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-clean-' & $dataset & (($week != null) ? '-' & $week : '') %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 120,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/clean_transactions_spark.py' %}",
+            "EntryPointArguments": "{% ($week != null) ? [$dataset, $week] : [$dataset] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=1 --conf spark.driver.memory=4g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=2g --conf spark.executor.instances=1 --conf spark.dynamicAllocation.initialExecutors=1 --conf spark.dynamicAllocation.maxExecutors=1 --conf spark.emr-serverless.executor.disk=100g' %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'Clean', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "Clean",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "WantFeatures?"
+    },
+    "WantFeatures?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $features %}",
+          "Next": "ParsePatterns"
+        }
+      ],
+      "Default": "LogSuccess"
+    },
+    "ParsePatterns": {
+      "Type": "Task",
+      "Comment": "Answer key -> curated/schemes + scheme_txns over every week cleaned so far (labels for the features and grading, never model input). Runs only right before Features, never after a clean-only run, so parallel cleans of one dataset never write these tables at the same time.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-parsepatterns-' & $dataset %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 60,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/parse_patterns_spark.py' %}",
+            "EntryPointArguments": "{% [$dataset] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=1 --conf spark.driver.memory=4g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=2g --conf spark.executor.instances=1 --conf spark.dynamicAllocation.initialExecutors=1 --conf spark.dynamicAllocation.maxExecutors=1' %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'ParsePatterns', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "ParsePatterns",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "ResumeFeatures?"
+    },
+    "ResumeFeatures?": {
+      "Type": "Choice",
+      "Comment": "Skip the builders an earlier, interrupted run already finished for this dataset/week.",
+      "Choices": [
+        {
+          "Condition": "{% $done.txn_done = true and $not($force) and $not($force_features) %}",
+          "Next": "FeaturesV3"
+        },
+        {
+          "Condition": "{% $done.v2_done = true and $not($force) and $not($force_features) %}",
+          "Next": "FeaturesTxn"
+        }
+      ],
+      "Default": "FeaturesV2"
+    },
+    "FeaturesV2": {
+      "Type": "Task",
+      "Comment": "Account-day graph features (rolling, fan-in/out, scatter-gather, cycles): curated/features_v2 (+ _sample). Sizing: 2-vCPU executors (11+5 GB), 10+4 GB driver (6+2 GB was killed in the cycles family); each feature family is checkpointed so the driver stays small (8 Nov fix).",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-features-v2-' & $dataset & (($week != null) ? '-' & $week : '') %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 120,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/build_features_spark.py' %}",
+            "EntryPointArguments": "{% ($week != null) ? [$dataset, $week, $week_end] : [$dataset] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1  --conf spark.driver.cores=2 --conf spark.driver.memory=10g --conf spark.driver.memoryOverhead=4g --conf spark.driver.extraJavaOptions=-Xlog:gc*:stdout:time,uptime --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=2 --conf spark.executor.memory=11g --conf spark.executor.memoryOverhead=5g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g --conf spark.emr-serverless.driver.disk=50g --conf spark.eventLog.logStageExecutorMetrics=true --conf spark.executor.processTreeMetrics.enabled=true --conf spark.executor.metrics.pollingInterval=5s --conf spark.eventLog.rotation.interval=60s' %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'FeaturesV2', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "FeaturesV2",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "MarkV2"
+    },
+    "MarkV2": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $marker_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': true, 'features': false, 'v2_done': true, 'txn_done': false, 'steps': $steps} %}"
+      },
+      "Next": "FeaturesTxn",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Assign": {
+        "done": "{% $merge([$done ? $done : {}, {'cleaned': true, 'v2_done': true}]) %}"
+      }
+    },
+    "FeaturesTxn": {
+      "Type": "Task",
+      "Comment": "Payment-level features (joins features_v2): curated/txn_features (+ _sample).",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-features-txn-' & $dataset & (($week != null) ? '-' & $week : '') %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 90,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/build_txn_features_spark.py' %}",
+            "EntryPointArguments": "{% ($week != null) ? [$dataset, 'features_v2', $week, $week_end] : [$dataset, 'features_v2'] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=20g --conf spark.driver.memoryOverhead=2g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g --conf spark.emr-serverless.driver.disk=50g' %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'FeaturesTxn', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "FeaturesTxn",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "MarkTxn"
+    },
+    "MarkTxn": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $marker_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': true, 'features': false, 'v2_done': true, 'txn_done': true, 'steps': $steps} %}"
+      },
+      "Next": "FeaturesV3",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Assign": {
+        "done": "{% $merge([$done ? $done : {}, {'cleaned': true, 'v2_done': true, 'txn_done': true}]) %}"
+      }
+    },
+    "FeaturesV3": {
+      "Type": "Task",
+      "Comment": "v3 extras (owner, cycles, trends): curated/features_v3 + txn_features_v3 (+ _sample), the 179 model features.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "{% 'aml-features-v3-' & $dataset & (($week != null) ? '-' & $week : '') %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 120,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/build_features_v3_spark.py' %}",
+            "EntryPointArguments": "{% ($week != null) ? [$dataset, $week, $week_end] : [$dataset] %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=20g --conf spark.driver.memoryOverhead=2g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g --conf spark.emr-serverless.driver.disk=50g' %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'FeaturesV3', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "FeaturesV3",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "LogSuccess"
+    },
+    "LogSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $marker_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'SUCCEEDED', 'cleaned': true, 'features': $features or ($done.features = true), 'steps': $steps, 'finished_at': $now()} %}"
+      },
+      "Next": "Emit?",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Assign": {
+        "done": "{% {'cleaned': true, 'features': $features or ($done.features = true)} %}"
+      }
+    },
+    "Emit?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $emit %}",
+          "Next": "EmitDataPrepared"
+        }
+      ],
+      "Default": "Done"
+    },
+    "EmitDataPrepared": {
+      "Type": "Task",
+      "Comment": "Tells BQ1 and BQ2 the week is ready (their EventBridge rules start them). Only for S3-started runs, so a nested call from BQ1 never starts BQ1 again.",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Arguments": {
+        "Entries": [
+          {
+            "EventBusName": "default",
+            "Source": "aml.prepare",
+            "DetailType": "DataPrepared",
+            "Detail": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features': $done.features = true, 'code_prefix': $code, 'app_id': $app_id} %}"
+          }
+        ]
+      },
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Pass",
+      "Output": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'cleaned': true, 'features': $done.features = true, 'steps': $steps} %}",
+      "End": true
+    },
+    "LogFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Key": "{% $marker_key %}",
+        "ContentType": "application/json",
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'FAILED', 'cleaned': $failed_step in ['ParsePatterns', 'FeaturesV2', 'FeaturesTxn', 'FeaturesV3'] or $done.cleaned = true, 'v2_done': $done.v2_done = true, 'txn_done': $done.txn_done = true, 'features': $done.features = true, 'failed_step': $failed_step, 'error': $error, 'steps': $steps, 'finished_at': $now()} %}"
+      },
+      "Next": "Failed",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ]
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $failed_step ? $failed_step : 'PrepareFailed' %}",
+      "Cause": "{% $string($error) %}"
+    },
+    "Saml?": {
+      "Type": "Choice",
+      "Comment": "SAML-R / SAML-C start from SAML-D, which has its own columns. ConvertSaml (saml_ramp_spark.py) writes them in the IBM layout under raw/, then the normal Clean runs. Converts only when raw/ has no files for the dataset yet, or when convert: true.",
+      "Choices": [
+        {
+          "Condition": "{% $is_saml and $convert %}",
+          "Next": "ConvertSaml"
+        },
+        {
+          "Condition": "{% $is_saml %}",
+          "Next": "HasRawSaml"
+        }
+      ],
+      "Default": "Clean"
+    },
+    "HasRawSaml": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:listObjectsV2",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Prefix": "{% 'raw/transactions/set=' & $dataset & '/' %}",
+        "MaxKeys": 1
+      },
+      "Assign": {
+        "has_raw": "{% $states.result.KeyCount > 0 %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "HasRawSaml",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "ConvertNeeded?"
+    },
+    "ConvertNeeded?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $has_raw %}",
+          "Next": "Clean"
+        }
+      ],
+      "Default": "ConvertSaml"
+    },
+    "ConvertSaml": {
+      "Type": "Task",
+      "Comment": "SAML-D.csv -> raw/transactions, raw/patterns, raw/accounts for BOTH SAML-R (emerging typologies switched on gradually) and SAML-C (control: never switched on), in the IBM layout. Settings (emerging typologies, doses, dates) are in bq2_common.py.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "{% $app_id %}",
+        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
+        "Name": "aml-convert-saml",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 60,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/saml_ramp_spark.py' %}",
+            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=2 --conf spark.driver.memory=8g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=2g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g' %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'ConvertSaml', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "LogFailure",
+          "Assign": {
+            "failed_step": "ConvertSaml",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "Clean"
+    }
+  }
+}
