@@ -35,3 +35,27 @@ resource "aws_sfn_state_machine" "bq2_weekly_ibm" {
     level                  = "ERROR"
   }
 }
+
+# The dashboard (EC2 role and the approver user) reads the HI-Large results under bq2_ibm/ (read-only).
+locals {
+  dashboard_ibm_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Effect = "Allow", Action = ["s3:GetObject"], Resource = "arn:aws:s3:::${var.bucket}/bq2_ibm/*" },
+      { Effect = "Allow", Action = ["s3:ListBucket"], Resource = "arn:aws:s3:::${var.bucket}",
+      Condition = { StringLike = { "s3:prefix" = ["bq2_ibm/*"] } } },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "dashboard_bq2_ibm" {
+  name   = "aml-dashboard-bq2-ibm"
+  role   = aws_iam_role.dashboard.id
+  policy = local.dashboard_ibm_policy
+}
+
+resource "aws_iam_user_policy" "bq2_approver_ibm" {
+  name   = "aml-bq2-approver-ibm"
+  user   = aws_iam_user.bq2_approver.name
+  policy = local.dashboard_ibm_policy
+}

@@ -42,6 +42,7 @@ ap.add_argument("--dry-run", action="store_true",
                 help="every Task becomes a Pass (no EMR, S3, SNS or SQS call, no cost): tests the flow, the week calendar"
                      " and the branches only. Writes aml_bq2_weekly_ibm_dryrun.json unless --out is given")
 ap.add_argument("--dry-run-alert", action="store_true", help="with --dry-run: pretend HI-Large-NT raised an alert")
+ap.add_argument("--dashboard-url", default="", help="optional: emails link to <url>/?approve=<dataset>")
 ap.add_argument("--out")
 a = ap.parse_args()
 role = a.role_arn or f"arn:aws:iam::{a.account}:role/aml-emr-serverless-job"
@@ -135,6 +136,9 @@ def approval(gate, text, nxt, on_reject):
 
 
 def notify(subject, text, nxt, dataset=NT):
+    if a.dashboard_url:          # approval emails open that request; the real-data alert opens the dashboard
+        url = a.dashboard_url.rstrip("/")
+        text += f" Review and decide: {url}/?approve={dataset}" if dataset == NT else f" Dashboard: {url}"
     return {"Type": "Task", "Resource": "arn:aws:states:::sns:publish",
             "Parameters": {"TopicArn": topic, "Subject": subject,
                            "Message.$": f"States.Format('{text}', '{dataset}', $.week_end)"},
