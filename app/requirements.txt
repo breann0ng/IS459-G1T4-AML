@@ -1,7 +1,9 @@
 # Streamlit app + laptop reports (Streamlit Community Cloud reads this file next to the app)
+# streamlit >= 1.67: the BQ1 site uses the top menu (st.navigation position="top"), st.iframe and theme font sizes
 pandas
 pyarrow
 numpy
-streamlit
-altair
+streamlit>=1.67
+altair>=5
 awscli
+boto3

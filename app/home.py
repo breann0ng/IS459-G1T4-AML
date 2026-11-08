@@ -8,10 +8,29 @@ from pathlib import Path
 
 import streamlit as st
 
-DATA_FILE = os.environ.get("BQ1_DATA", "dashboard_data_enrui_breann_mld20.json")
+# the weekly pipeline's merged results (local/reports/final_report.py with AML_LIVE=1) when present, else the one-off run
+_LIVE = Path(__file__).parent / "data" / "dashboard_data_live_HI-Large-live.json"
+DATA_FILE = os.environ.get("BQ1_DATA", _LIVE.name if _LIVE.exists() else "dashboard_data_enrui_breann_mld20.json")
 NAMES = ["Breann", "Lesley", "Joey", "Tasha", "En Rui", "Wei Ting"]
 
-d = json.loads((Path(__file__).parent / "data" / DATA_FILE).read_text())
+def _load():
+    """Same source as app_bq1.py: the weekly results live from Athena when AWS is configured (aws_data.load_bq1_live,
+    cached 10 min), else the saved file DATA_FILE. BQ1_SOURCE=file always uses the file."""
+    if os.environ.get("BQ1_SOURCE", "athena") != "file":
+        try:
+            import aws_data
+            if aws_data.enabled():
+                return aws_data.load_bq1_live()
+        except Exception as e:                    # never break the page: fall back to the saved file
+            print(f"[bq1] Athena unavailable, showing data/{DATA_FILE}: {e}")
+    return json.loads((Path(__file__).parent / "data" / DATA_FILE).read_text())
+
+
+d = _load()
+# scheme timings from the one-off run (weekly runs cut schemes at the week boundary); see app_bq1.py
+_ONEOFF = Path(__file__).parent / "data" / "dashboard_data_enrui_breann_mld20.json"
+if d.get("weeks") and _ONEOFF.exists():
+    d["schemes_total"] = json.loads(_ONEOFF.read_text())["schemes_total"]
 f = next(r for r in d["stage1"] if r["level"] == "account_day" and r["cutoff"] == "frozen_threshold")
 tot = d["schemes_total"]
 
