@@ -27,6 +27,10 @@ together with the BQ2 team and test `aml_bq2_weekly` on one SAML week first.
   - `eventbridge/`: the two rules of the automatic weekly flow:
     1. `raw/transactions/set=<dataset>/week=<Monday>/_SUCCESS` -> `aml_prepare` (which emits `DataPrepared`).
     2. `DataPrepared` for a `*-live` dataset -> `aml_bq1_score`.
+    3. `aml-bq1-run-ended` (`rule_run_ended.json` / `targets_run_ended.json`): an `aml_prepare` or
+       `aml_bq1_score` run FAILED / TIMED_OUT / ABORTED -> email via SNS `aml-bq1-weekly-alerts`
+       (is459g1t4@gmail.com). Live since 9 Nov; tested with a BadInput run (delivered). The message
+       leaves out the run input: inserting that JSON into the text made every delivery fail.
 
 ## Switching the weekly trigger to the new flow (done, 9 Nov 2026)
 

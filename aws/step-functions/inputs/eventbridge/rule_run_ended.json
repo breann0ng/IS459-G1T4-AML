@@ -1,0 +1,4 @@
+{"source": ["aws.states"], "detail-type": ["Step Functions Execution Status Change"],
+ "detail": {"status": ["FAILED", "TIMED_OUT", "ABORTED"],
+            "stateMachineArn": ["arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare",
+                                "arn:aws:states:us-east-1:390402569482:stateMachine:aml_bq1_score"]}}
