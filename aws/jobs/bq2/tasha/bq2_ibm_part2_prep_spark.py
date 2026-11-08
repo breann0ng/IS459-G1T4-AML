@@ -117,10 +117,23 @@ def main():
     boosters = {m: text(f"{ROOT}/{d.strip('/')}/stage1.txt") for m, d in MODELS.items()}
     thr = {m: float(metas[m]["threshold"]) for m in MODELS}
 
-    # ---- 1. meta.json per evaluation dataset x version (validation scored once per model)
-    vals = {m: validation(m, metas[m], boosters[m]) for m in MODELS}
+    # ---- 1. meta.json per evaluation dataset x version (validation scored once per model).
+    # The validation days never change, so once every meta.json exists it is reused (BQ2_REUSE_META=0 forces a
+    # rescore): weekly runs then skip rescoring HI-Small / HI-Medium, which need not even be in the bucket.
+    def existing(ds_name, ver):
+        try:
+            return json.loads(text(f"{ROOT}/models/bq2r/{ds_name}/{ver}/meta.json"))
+        except Exception:
+            return None
+    have = {(d, v): existing(d, v) for d, vs in PLAN.items() for v in vs}
+    reuse = os.environ.get("BQ2_REUSE_META", "1") == "1" and all(have.values())
+    if reuse:
+        print("[ibm-prep] validation already scored: reusing models/bq2r/*/meta.json")
+    vals = {} if reuse else {m: validation(m, metas[m], boosters[m]) for m in MODELS}
     for ds_name, versions in PLAN.items():
         for ver, m in versions.items():
+            if reuse:
+                continue
             excl = list(metas[m].get("excluded_patterns") or [])
             val, by = vals[m]
             meta = {"dataset": ds_name, "version": ver, "model_folder": MODELS[m], "model": m,
