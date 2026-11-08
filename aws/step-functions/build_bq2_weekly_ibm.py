@@ -38,7 +38,11 @@ ap.add_argument("--max-executors", type=int, default=3)   # the team app is capp
 ap.add_argument("--prefix", default="bq2_ibm",
                 help="everything this pipeline reads and writes lives under s3://<bucket>/<prefix>/ (its own curated/,"
                      " analytics/, models/, progress/, jobs/), so the team's batch HI-Large and models/ are never touched")
-ap.add_argument("--out", default="aws/step-functions/aml_bq2_weekly_ibm.json")
+ap.add_argument("--dry-run", action="store_true",
+                help="every Task becomes a Pass (no EMR, S3, SNS or SQS call, no cost): tests the flow, the week calendar"
+                     " and the branches only. Writes aml_bq2_weekly_ibm_dryrun.json unless --out is given")
+ap.add_argument("--dry-run-alert", action="store_true", help="with --dry-run: pretend HI-Large-NT raised an alert")
+ap.add_argument("--out")
 a = ap.parse_args()
 role = a.role_arn or f"arn:aws:iam::{a.account}:role/aml-emr-serverless-job"
 topic = a.topic_arn or f"arn:aws:sns:{a.region}:{a.account}:aml-bq2-alerts"
@@ -237,7 +241,56 @@ def check(states):     # every Next / Default / Catch target exists, recursively
             check(b["States"])
 
 
+def dry(states):
+    """Replace every Task with a Pass that keeps the same name, Next/End and ResultPath."""
+    for name, st in list(states.items()):
+        for b in st.get("Branches", []):
+            dry(b["States"])
+        if st.get("Type") != "Task":
+            continue
+        new = {"Type": "Pass", "Comment": f"DRY RUN: would call {st['Resource'].split(':::')[-1]}"}
+        if name.startswith("Has") and name.endswith("?"):           # pretend nothing is built: show the build path
+            new["Next"] = st["Catch"][0]["Next"]
+            new["ResultPath"] = None
+        elif name in ("ReadDecision", "ReadDecisionReal"):
+            alert = a.dry_run_alert and name == "ReadDecision"
+            new.update(Result={"v": {"alert": alert, "retrain": "v1", "deploy_from": "2022-10-31", "note": "dry run"}},
+                       ResultPath=st["ResultPath"], Next=st["Next"])
+        elif name == "ReadPointer":
+            new.update(Result={"v": {"week_index": 0}}, ResultPath=st["ResultPath"], Next=st["Next"])
+        elif "waitForTaskToken" in st["Resource"]:
+            new.update(Result={"approved_by": "dry-run"}, ResultPath=st["ResultPath"], Next=st["Next"])
+        else:
+            new["ResultPath"] = None
+            new.update({"Next": st["Next"]} if "Next" in st else {"End": True})
+        states[name] = new
+
+
 check(S)
+def prune(states, start):
+    """Step Functions rejects unreachable states; a Pass has no Catch, so the catch-only targets go."""
+    seen, todo = set(), [start]
+    while todo:
+        n = todo.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        st = states[n]
+        todo += [t for t in [st.get("Next"), st.get("Default")] + [c["Next"] for c in st.get("Choices", []) +
+                                                                     st.get("Catch", [])] if t]
+        for b in st.get("Branches", []):
+            prune(b["States"], b["StartAt"])
+    for n in set(states) - seen:
+        del states[n]
+
+
+if a.dry_run:
+    dry(S)
+    prune(S, "HasWeek")
+    sm["Comment"] = "DRY RUN (no EMR, S3, SNS or SQS calls, no cost) of " + sm["Comment"]
+    check(S)
+a.out = a.out or ("aws/step-functions/aml_bq2_weekly_ibm_dryrun.json" if a.dry_run
+                  else "aws/step-functions/aml_bq2_weekly_ibm.json")
 with open(a.out, "w") as f:
     json.dump(sm, f, indent=1)
 print(f"wrote {a.out}: {len(S)} top-level states; {len(starts)} weeks ({starts[0]} .. {ends[-1]}), "

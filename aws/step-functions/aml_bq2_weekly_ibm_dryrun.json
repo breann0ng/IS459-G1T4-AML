@@ -1,0 +1,372 @@
+{
+ "Comment": "DRY RUN (no EMR, S3, SNS or SQS calls, no cost) of AML BQ2 weekly run for IBM HI-Large (real data) and HI-Large-NT (fan-in / fan-out appear on 2022-10-03): one simulated week per execution",
+ "StartAt": "HasWeek",
+ "States": {
+  "HasWeek": {
+   "Type": "Choice",
+   "Choices": [
+    {
+     "Variable": "$.week_index",
+     "IsPresent": true,
+     "Next": "InRange?"
+    }
+   ],
+   "Default": "ReadPointer"
+  },
+  "ReadPointer": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call aws-sdk:s3:getObject",
+   "Result": {
+    "v": {
+     "week_index": 0
+    }
+   },
+   "ResultPath": "$.ptr",
+   "Next": "UsePointer"
+  },
+  "UsePointer": {
+   "Type": "Pass",
+   "Parameters": {
+    "week_index.$": "$.ptr.v.week_index"
+   },
+   "Next": "InRange?"
+  },
+  "InRange?": {
+   "Type": "Choice",
+   "Choices": [
+    {
+     "Variable": "$.week_index",
+     "NumericGreaterThanEquals": 13,
+     "Next": "DataEnded"
+    }
+   ],
+   "Default": "AddCalendar"
+  },
+  "DataEnded": {
+   "Type": "Succeed",
+   "Comment": "every scored week is graded"
+  },
+  "AddCalendar": {
+   "Type": "Pass",
+   "Result": {
+    "starts": [
+     "2022-08-29",
+     "2022-09-05",
+     "2022-09-12",
+     "2022-09-19",
+     "2022-09-26",
+     "2022-10-03",
+     "2022-10-10",
+     "2022-10-17",
+     "2022-10-24",
+     "2022-10-31",
+     "2022-11-07",
+     "2022-11-14",
+     "2022-11-21"
+    ],
+    "ends": [
+     "2022-09-04",
+     "2022-09-11",
+     "2022-09-18",
+     "2022-09-25",
+     "2022-10-02",
+     "2022-10-09",
+     "2022-10-16",
+     "2022-10-23",
+     "2022-10-30",
+     "2022-11-06",
+     "2022-11-13",
+     "2022-11-20",
+     "2022-11-27"
+    ],
+    "scored": [
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   "ResultPath": "$.cal",
+   "Next": "Calendar"
+  },
+  "Calendar": {
+   "Type": "Pass",
+   "Parameters": {
+    "dataset": "HI-Large-NT",
+    "week_index.$": "$.week_index",
+    "week_start.$": "States.ArrayGetItem($.cal.starts, $.week_index)",
+    "week_end.$": "States.ArrayGetItem($.cal.ends, $.week_index)",
+    "new_data.$": "States.ArrayGetItem($.cal.scored, $.week_index)"
+   },
+   "Next": "Weekly"
+  },
+  "Weekly": {
+   "Type": "Parallel",
+   "ResultPath": null,
+   "Next": "ReadDecision",
+   "Branches": [
+    {
+     "StartAt": "Part1",
+     "States": {
+      "Part1": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+       "ResultPath": null,
+       "Next": "Part1NewTactic"
+      },
+      "Part1NewTactic": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+       "ResultPath": null,
+       "End": true
+      }
+     }
+    },
+    {
+     "StartAt": "NewData?",
+     "States": {
+      "NewData?": {
+       "Type": "Choice",
+       "Choices": [
+        {
+         "Variable": "$.new_data",
+         "BooleanEquals": true,
+         "Next": "HasFeatures?"
+        }
+       ],
+       "Default": "Evaluate",
+       "Comment": "label-only weeks: no new payments, only newly confirmed cases to grade"
+      },
+      "HasFeatures?": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call aws-sdk:s3:headObject",
+       "Next": "BuildFeatures",
+       "ResultPath": null
+      },
+      "BuildFeatures": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+       "ResultPath": null,
+       "Next": "MarkFeatures"
+      },
+      "MarkFeatures": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call aws-sdk:s3:putObject",
+       "ResultPath": null,
+       "Next": "HasTxnFeatures?"
+      },
+      "HasTxnFeatures?": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call aws-sdk:s3:headObject",
+       "Next": "BuildTxnFeatures",
+       "ResultPath": null
+      },
+      "BuildTxnFeatures": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+       "ResultPath": null,
+       "Next": "MarkTxnFeatures"
+      },
+      "MarkTxnFeatures": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call aws-sdk:s3:putObject",
+       "ResultPath": null,
+       "Next": "HasV3Features?"
+      },
+      "HasV3Features?": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call aws-sdk:s3:headObject",
+       "Next": "BuildV3Features",
+       "ResultPath": null
+      },
+      "BuildV3Features": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+       "ResultPath": null,
+       "Next": "MarkV3Features"
+      },
+      "MarkV3Features": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call aws-sdk:s3:putObject",
+       "ResultPath": null,
+       "Next": "HasScores?"
+      },
+      "HasScores?": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call aws-sdk:s3:headObject",
+       "Next": "BuildScores",
+       "ResultPath": null
+      },
+      "BuildScores": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+       "ResultPath": null,
+       "Next": "MarkScores"
+      },
+      "MarkScores": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call aws-sdk:s3:putObject",
+       "ResultPath": null,
+       "Next": "PrepToDate"
+      },
+      "PrepToDate": {
+       "Type": "Pass",
+       "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+       "ResultPath": null,
+       "Next": "Evaluate"
+      },
+      "Evaluate": {
+       "Type": "Parallel",
+       "ResultPath": null,
+       "End": true,
+       "Branches": [
+        {
+         "StartAt": "EvalReal",
+         "States": {
+          "EvalReal": {
+           "Type": "Pass",
+           "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+           "ResultPath": null,
+           "End": true
+          }
+         }
+        },
+        {
+         "StartAt": "EvalNewTactic",
+         "States": {
+          "EvalNewTactic": {
+           "Type": "Pass",
+           "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+           "ResultPath": null,
+           "End": true
+          }
+         }
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "ReadDecision": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call aws-sdk:s3:getObject",
+   "Result": {
+    "v": {
+     "alert": false,
+     "retrain": "v1",
+     "deploy_from": "2022-10-31",
+     "note": "dry run"
+    }
+   },
+   "ResultPath": "$.decision",
+   "Next": "ReadDecisionReal"
+  },
+  "ReadDecisionReal": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call aws-sdk:s3:getObject",
+   "Result": {
+    "v": {
+     "alert": false,
+     "retrain": "v1",
+     "deploy_from": "2022-10-31",
+     "note": "dry run"
+    }
+   },
+   "ResultPath": "$.decision_real",
+   "Next": "Alert?"
+  },
+  "Alert?": {
+   "Type": "Choice",
+   "Choices": [
+    {
+     "Variable": "$.decision.v.alert",
+     "BooleanEquals": true,
+     "Next": "NotifyRetrain"
+    },
+    {
+     "Variable": "$.decision_real.v.alert",
+     "BooleanEquals": true,
+     "Next": "NotifyRealAlert"
+    }
+   ],
+   "Default": "Advance"
+  },
+  "NotifyRealAlert": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call sns:publish",
+   "ResultPath": null,
+   "Next": "Advance"
+  },
+  "NotifyRetrain": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call sns:publish",
+   "ResultPath": null,
+   "Next": "WaitRetrain"
+  },
+  "WaitRetrain": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call sqs:sendMessage.waitForTaskToken",
+   "Result": {
+    "approved_by": "dry-run"
+   },
+   "ResultPath": "$.retrain_gate",
+   "Next": "ChallengerReady"
+  },
+  "ChallengerReady": {
+   "Type": "Pass",
+   "Next": "EvalChallenger",
+   "Comment": "v1 = the BQ1 model trained with fan-in / fan-out; PrepToDate scores it every week"
+  },
+  "EvalChallenger": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+   "ResultPath": null,
+   "Next": "NotifyDeploy"
+  },
+  "NotifyDeploy": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call sns:publish",
+   "ResultPath": null,
+   "Next": "WaitDeploy"
+  },
+  "WaitDeploy": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call sqs:sendMessage.waitForTaskToken",
+   "Result": {
+    "approved_by": "dry-run"
+   },
+   "ResultPath": "$.deploy_gate",
+   "Next": "Deploy"
+  },
+  "Deploy": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call emr-serverless:startJobRun.sync",
+   "ResultPath": null,
+   "Next": "Advance"
+  },
+  "Advance": {
+   "Type": "Pass",
+   "Parameters": {
+    "week_index.$": "States.MathAdd($.week_index, 1)"
+   },
+   "ResultPath": "$.next",
+   "Next": "SavePointer"
+  },
+  "SavePointer": {
+   "Type": "Pass",
+   "Comment": "DRY RUN: would call aws-sdk:s3:putObject",
+   "ResultPath": null,
+   "End": true
+  }
+ }
+}
