@@ -98,6 +98,11 @@ st.title("BQ1 · Early detection")
 st.markdown("<div style='font-size:1.35rem;line-height:1.4;font-weight:600;margin:.1rem 0 .5rem'>How can we "
             "automatically detect laundering patterns early, while keeping false alerts low enough for analysts "
             "to manage?</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='display:inline-block;background:rgba(144,133,233,.13);border:1px solid #3a3150;"
+            f"border-radius:999px;padding:.35rem 1rem;margin:.2rem 0 1rem'><b>Test data:</b> {days} unseen "
+            f"days of HI-Large ({pd.to_datetime(frozen['date_from']):%d %b} to {pd.to_datetime(frozen['date_to']):%d %b %Y}, "
+            f"{frozen['payments'] / 1e6:.1f}M payments). The model never saw these days in training.</div>",
+            unsafe_allow_html=True)
 tab1, tab2, tab3, tab4 = st.tabs([":material/notifications: Alerts & accuracy", ":material/timer: Speed",
                                   ":material/groups: Who checks what", ":material/inventory_2: Archived findings"])
 
@@ -135,7 +140,7 @@ with tab1:
     pc = opts[["k", "precision"]].copy()
     xp = alt.X("k:O", title="Alerts reviewed per day", sort=pc["k"].tolist(), axis=alt.Axis(labelAngle=0, format=","))
     pline = alt.Chart(pc).mark_line(strokeWidth=2.5, color=BLUE, point=alt.OverlayMarkDef(filled=True, size=60)).encode(
-        x=xp, y=alt.Y("precision:Q", title="Alerts that are real (precision)", axis=alt.Axis(format="%"),
+        x=xp, y=alt.Y("precision:Q", title="Real alerts (precision)", axis=alt.Axis(format="%"),
                       scale=alt.Scale(domain=[0, 1])),
         tooltip=[alt.Tooltip("k:O", title="Alerts/day", format=","), alt.Tooltip("precision:Q", format=".1%")])
     prule = alt.Chart(pd.DataFrame({"k": [pick]})).mark_rule(color=INK, strokeDash=[4, 4]).encode(x=xp)
@@ -177,6 +182,42 @@ with tab1:
                  "HI-Small and HI-Medium validation days and never tuned on HI-Large. The data is IBM's synthetic AML "
                  "data, so real banks' volumes and patterns will differ."))
 
+
+    # ---------------------------------------------------------------- 1b. two queues
+    qs = {q["queue"]: q for q in d.get("queues") or []}
+    if {"main", "second", "all"} <= set(qs):
+        main_q, second_q, all_q = qs["main"], qs["second"], qs["all"]
+        st.divider()
+        st.markdown(f"#### :material/call_split: Two queues lift the main queue to {pct(main_q['precision'])} real alerts")
+        q1, q2, q3 = st.columns(3)
+        q1.metric("Main queue: alerts a day", per_day(main_q["alerts"] / main_q["days"]),
+                  f"{pct(main_q['precision'])} real (was {pct(all_q['precision'])})", delta_arrow="off",
+                  help=f"Alerts the namer gives a pattern name: {main_q['true_alerts']:,} of {main_q['alerts']:,} are real. "
+                       f"With every alert in one queue: {all_q['true_alerts']:,} of {all_q['alerts']:,}.")
+        q2.metric("Laundering the main queue catches", pct(main_q["recall"]), f"was {pct(all_q['recall'])}",
+                  delta_color="off", delta_arrow="off",
+                  help=f"{main_q['true_alerts']:,} of the {main_q['positives']:,} laundering account-days.")
+        q3.metric("Second queue: alerts a day", per_day(second_q["alerts"] / second_q["days"]),
+                  f"{pct(second_q['precision'])} real", delta_color="off", delta_arrow="off",
+                  help=f"Alerts the namer calls 'unclassified': {second_q['true_alerts']:,} of {second_q['alerts']:,} are real.")
+        takeaway(f"the pattern namer doubles as a noise filter. Alerts it cannot match to any pattern are mostly false "
+                 f"({pct(second_q['precision'])} real), so moving them to a second queue lifts the main queue from "
+                 f"{pct(all_q['precision'])} to {pct(main_q['precision'])} real while it still catches "
+                 f"{pct(main_q['recall'])} of laundering (was {pct(all_q['recall'])}). Analysts get fewer wasted reviews "
+                 "for almost no loss, and nothing is thrown away.",
+                 ["**Which half of BQ1 this answers.** 'False alerts low enough for analysts to manage': it raises the "
+                  "share of real alerts without changing the model or the alert threshold.",
+                  f"**What the numbers tell us.** About {per_day(second_q['alerts'] / second_q['days'])} alerts a day go to "
+                  f"the second queue, and most of them are false. The main queue loses only "
+                  f"{(all_q['recall'] - main_q['recall']) * 100:.1f} points of laundering caught.",
+                  "**Checked before trusting it.** The idea was spotted on these test results, so it was checked on the "
+                  "validation days first: precision rose from 91.2% to 94.1% on HI-Medium and from 89.7% to 92.1% on "
+                  "HI-Small. It holds on both, a little smaller than here.",
+                  "**The decision it supports.** Run two queues: the main one at full priority, the second one checked "
+                  "when the main queue is done. Every alert is still reviewed eventually."],
+                 read="Every alert gets a pattern name from stage 2. Alerts named 'unclassified' (no known pattern) go to "
+                      "the second queue; every other alert stays in the main queue. Counts include alert expansion (linked "
+                      "accounts alerted too), so the all-alerts precision here is slightly below the number at the top.")
 
 with tab2:
     # ------------------------------------------------------------------ 2. speed
