@@ -46,6 +46,7 @@ BASE = DATASET.removesuffix("-live")                 # HI-Large-live -> HI-Large
 # so week N means the same dates in a weekly run and a whole-dataset run.
 FIRST_DAY = {
     "HI-Small": "2022-09-01",
+    "HI-Medium": "2022-09-01",
     "HI-Large": "2022-08-01",
 }
 
