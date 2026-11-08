@@ -145,3 +145,45 @@ def answer(item, approve, who):
     except Exception:
         pass                                                      # a stale handle only means it reappears once
     return err
+
+
+# ------------------------------------------------------------------ HI-Large (Tasha's weekly pipeline)
+IBM_DS, IBM_NT = "HI-Large", "HI-Large-NT"
+
+
+def ibm_root():
+    """The HI-Large pipeline keeps everything under its own prefix (default s3://<bucket>/bq2_ibm)."""
+    return f"{_cfg('AML_ROOT')}/{_cfg('BQ2_IBM_PREFIX', 'bq2_ibm')}"
+
+
+def _ibm_table(name, ds_):
+    """One small result table (a few hundred rows), read straight from S3 with pyarrow; [] when absent."""
+    import pyarrow.dataset as pads
+    from pyarrow import fs
+    kw = {"region": _cfg("AWS_REGION", "us-east-1")}
+    if _cfg("AWS_ACCESS_KEY_ID"):
+        kw.update(access_key=_cfg("AWS_ACCESS_KEY_ID"), secret_key=_cfg("AWS_SECRET_ACCESS_KEY"))
+    try:
+        t = pads.dataset(f"{ibm_root().removeprefix('s3://')}/analytics/{name}", filesystem=fs.S3FileSystem(**kw),
+                         format="parquet", partitioning="hive").to_table().to_pandas()
+    except (FileNotFoundError, OSError):
+        return []
+    t["dataset"] = t["dataset"].astype(str)
+    t = t[t["dataset"] == ds_]
+    return json.loads(t.to_json(orient="records", date_format="iso"))
+
+
+def load_ibm():
+    """Same keys as data/bq2_ibm_data.json (bq2_ibm_report.py), plus the pipeline's pointer and live model."""
+    pre = _cfg("BQ2_IBM_PREFIX", "bq2_ibm")
+    out = {"part1": {}, "part2": {}, "meta": {}, "decision": {}, "decision_latest": {}, "deployed": {}}
+    for key, tag in (("real", ""), ("new_tactic", "_nt")):
+        out["part1"][key] = {k: _ibm_table(f"bq2r_part1_{k}{tag}", IBM_DS) for k in ("weekly", "shares", "summary")}
+    for key, ds_ in (("real", IBM_DS), ("new_tactic", IBM_NT)):
+        out["part2"][key] = {k: _ibm_table(f"bq2r_part2_{k}", ds_) for k in ("weekly", "rules", "typology")}
+        out["decision"][key] = get_json(f"{pre}/models/bq2r/{ds_}/decision.json", {})
+        out["decision_latest"][key] = get_json(f"{pre}/models/bq2r/{ds_}/decision_latest.json", {})
+        out["deployed"][key] = get_json(f"{pre}/models/bq2r/{ds_}/deployed.json", {})
+        out["meta"][key] = {v: get_json(f"{pre}/models/bq2r/{ds_}/{v}/meta.json", {}) for v in ("v0", "v1")}
+    out["progress"] = get_json(f"{pre}/progress/bq2_weekly_ibm.json", {})
+    return out

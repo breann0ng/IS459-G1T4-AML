@@ -1,0 +1,49 @@
+{
+ "source": "analytics/group_stage2, config enrui_breann_mld20_grp (the final namer), method group, validation days of HI-Small + HI-Medium pooled; truly laundering alerts of a known pattern",
+ "patterns": [
+  {
+   "pattern": "cycle",
+   "first": 0.31835205992509363,
+   "top2": 0.6966292134831461,
+   "cases": 801
+  },
+  {
+   "pattern": "fan_in",
+   "first": 0.5382198952879581,
+   "top2": 0.8104712041884817,
+   "cases": 955
+  },
+  {
+   "pattern": "fan_out",
+   "first": 0.4972375690607735,
+   "top2": 0.824585635359116,
+   "cases": 724
+  },
+  {
+   "pattern": "gather_scatter",
+   "first": 0.5528503562945368,
+   "top2": 0.8034441805225653,
+   "cases": 1684
+  },
+  {
+   "pattern": "layering",
+   "first": 0.8037081821846029,
+   "top2": 0.8802902055622733,
+   "cases": 2481
+  },
+  {
+   "pattern": "random",
+   "first": 0.29668674698795183,
+   "top2": 0.7725903614457831,
+   "cases": 664
+  },
+  {
+   "pattern": "scatter_gather",
+   "first": 0.752059925093633,
+   "top2": 0.8898876404494382,
+   "cases": 1335
+  }
+ ],
+ "first_macro": 0.53701639069065,
+ "top2_macro": 0.8111283487158291
+}

@@ -85,6 +85,42 @@ def main():
     else:
         alerts_by_pred = []
 
+    # two guesses (namer runs with second_pattern): of truly laundering, patterned alerts, how often
+    # the true pattern is the first guess / one of the two guesses
+    top2, alert_examples = [], []
+    if not named.empty and "second_pattern" in named:
+        tp = named[(named["label"] == 1) & ~named["true_pattern"].isin(["unclassified", "not_laundering"])]
+        t = tp.assign(top1=tp["true_pattern"] == tp["predicted_pattern"],
+                      top2=(tp["true_pattern"] == tp["predicted_pattern"]) | (tp["true_pattern"] == tp["second_pattern"]))
+        t2 = t.groupby("true_pattern").agg(cases=("top1", "size"), top1=("top1", "mean"), top2=("top2", "mean")).reset_index()
+        top2 = clean(pd.concat([t2, pd.DataFrame([{"true_pattern": "ALL", "cases": len(t),
+                                                   "top1": t["top1"].mean(), "top2": t["top2"].mean()}])]))
+        ex = (named.sort_values("score", ascending=False).drop_duplicates("group_id")
+                   .groupby("predicted_pattern").head(3))
+        alert_examples = clean(ex[["date", "acct", "score", "predicted_pattern", "pattern_confidence", "second_pattern",
+                                   "second_confidence", "group_id", "g_accounts", "g_payments", "true_pattern"]])
+    print(f"\n=== two guesses: {len(top2)} rows")
+
+    # two queues: alerts the namer cannot match to any pattern ("unclassified") go to a second queue.
+    # Validation (txn_v3m_xp, account namer): precision 0.912 -> 0.941 (HI-Medium), 0.897 -> 0.921 (HI-Small).
+    queues = []
+    if not named.empty:
+        ad_pos = int(res[(res["level"] == "account_day") & (res["cutoff"] == "frozen_threshold")]["positives"].iloc[0])
+        n_days = named["date"].nunique()
+        second = named["predicted_pattern"] == "unclassified"
+        for q, x in [("all", named), ("main", named[~second]), ("second", named[second])]:
+            queues.append({"queue": q, "alerts": len(x), "true_alerts": int(x["label"].sum()), "positives": ad_pos,
+                           "days": n_days, "precision": float(x["label"].mean()) if len(x) else None,
+                           "recall": float(x["label"].sum() / ad_pos)})
+        print("\n=== queues (unclassified alerts -> second queue)")
+        print(pd.DataFrame(queues).round(3).to_string(index=False))
+
+    # one row per scheme for the speed chart (hours from the scheme's first payment)
+    per_scheme = sch.assign(
+        hours_to_alert=(pd.to_datetime(sch["alert_ready_time"]) - pd.to_datetime(sch["start_time"])).dt.total_seconds() / 3600)
+    per_scheme = clean(per_scheme[["pattern_type", "n_payments", "caught", "duration_h", "hours_to_first_flag",
+                                   "hours_to_alert", "caught_before_end_eod"]].round(2))
+
     out = {"dataset": DATASET, "stage1": clean(res), "daily": clean(daily.sort_values(["level", "date"])),
            "budget": clean(budget.sort_values(["level", "k_per_day"])), "patterns": clean(p),
            "schemes_by_pattern": clean(by), "schemes_total": tot,
@@ -92,7 +128,8 @@ def main():
                                        .pipe(lambda s: pd.cut(s, [-0.01, 1, 3, 6, 12, 24, 48, 96]).value_counts().sort_index()
                                              .rename("schemes").reset_index().assign(bucket=lambda d: d.iloc[:, 0].astype(str)))[["bucket", "schemes"]]),
            "stage2": clean(st2) if not st2.empty else [], "confusion": conf, "example_groups": examples,
-           "alerts_by_predicted_pattern": alerts_by_pred}
+           "alerts_by_predicted_pattern": alerts_by_pred,
+           "schemes": per_scheme, "top2": top2, "alert_examples": alert_examples, "queues": queues}
     out_file = "dashboard_data.json" if RUN == "final" else f"dashboard_data_{RUN}.json"
     with open(out_file, "w") as f:
         json.dump(out, f, indent=1, default=str)

@@ -96,6 +96,12 @@ RANDOM_SEED = 42
 # Optional chunk, from the command line: OUTPUT_FROM and OUTPUT_TO ("YYYY-MM-DD", inclusive)
 OUTPUT_FROM = sys.argv[2] if len(sys.argv) > 2 else None
 OUTPUT_TO = sys.argv[3] if len(sys.argv) > 3 else None
+# Daily mode (Step Functions aml-daily): with no chunk given, build the week of AML_RUN_DATE so far
+# (Monday to that day). The chunk still reads its look-back history and rewrites only that week.
+if os.environ.get("AML_RUN_DATE") and not OUTPUT_FROM:
+    import datetime as _dt
+    _d = _dt.date.fromisoformat(os.environ["AML_RUN_DATE"])
+    OUTPUT_FROM, OUTPUT_TO = (_d - _dt.timedelta(days=_d.weekday())).isoformat(), _d.isoformat()
 LOOKBACK_DAYS = 21             # history read before OUTPUT_FROM (> the longest window, 14 days)
 SHUFFLE_PARTITIONS = int(os.environ.get("AML_SHUFFLE", 400))   # env override: local tests only
 # =========================================================================================
@@ -105,6 +111,14 @@ DAY = 86400
 DISK = StorageLevel.MEMORY_AND_DISK
 
 spark = SparkSession.builder.appName(f"BuildFeatures-{DATASET}").getOrCreate()
+
+
+def rebalance(df, *cols):
+    """REBALANCE hint in SQL form: works on Spark 3.2+ (EMR 7, local 3.5) and 4.x (EMR Serverless 8).
+    df.hint("rebalance", "col", ...) only works on Spark 4 (3.5 passes the names as strings and fails)."""
+    view = f"_rebalance_{id(df)}"
+    df.createOrReplaceTempView(view)
+    return spark.sql(f"SELECT /*+ REBALANCE({', '.join(cols)}) */ * FROM {view}")
 spark.sparkContext.setLogLevel("WARN")      # keep logs small: warnings and errors only
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 spark.conf.set("spark.sql.adaptive.enabled", "true")
@@ -119,10 +133,14 @@ def node(bank, account):
 # =========================================================================== load inputs
 def load_transactions():
     all_txns = spark.read.parquet(f"{CURATED}/transactions").filter(F.col("dataset") == DATASET)
-    # Median payment per currency over the WHOLE dataset, so every chunk uses the same reference.
-    med_paid = all_txns.groupBy("payment_currency").agg(
+    # Median payment per currency: whole dataset; a chunk uses only payments up to its last day
+    # (no future weeks, even when later weeks are already cleaned).
+    med_base = all_txns
+    if OUTPUT_TO:
+        med_base = med_base.filter(F.col("txn_date") <= F.lit(OUTPUT_TO).cast("date"))
+    med_paid = med_base.groupBy("payment_currency").agg(
         F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
-    med_recv = all_txns.groupBy("receiving_currency").agg(
+    med_recv = med_base.groupBy("receiving_currency").agg(
         F.expr("percentile_approx(amount_received, 0.5)").cast("double").alias("med_recv"))
     txns = all_txns
     if OUTPUT_FROM:
@@ -293,6 +311,20 @@ def gather_scatter_max(edges, W, out_name):
 
 
 # ============================================================================ multi-hop
+def since(df, days):
+    """Chunk mode: keep only payments from `days` before OUTPUT_FROM. Each heavy step gets the
+    history its OUTPUT days need and no more, so the chunk's own rows are unchanged:
+      fan-in / fan-out / gather-scatter over w days   -> w days
+      scatter-gather (2 hops within 3 days, then a 3-day sliding max)  -> 2 x 3 = 6 days
+      cycles (closed within 7 days, then cycles_7d sums 7 days)        -> 7 + 6 = 13 days
+    The hub list is still built from the full look-back (hubs depend on how much is read).
+    Whole-dataset runs (no OUTPUT_FROM) are untouched."""
+    if not OUTPUT_FROM:
+        return df
+    cut = F.unix_timestamp(F.to_timestamp(F.lit(OUTPUT_FROM))) - days * DAY
+    return df.filter(F.col("ts") >= cut)
+
+
 def non_hub_edges(edges):
     degree = (edges.select(F.col("src").alias("n"), F.col("dst").alias("cp"))
                    .unionByName(edges.select(F.col("dst").alias("n"), F.col("src").alias("cp")))
@@ -402,11 +434,12 @@ def main():
     fan_cols = []
     for w in WINDOWS_DAYS:
         W = w * DAY
-        fin = sliding_distinct_max(edges.select(F.col("dst").alias("acct"), F.col("src").alias("cp"), "ts"),
+        e_w = since(edges, w)          # chunk mode: only the w days of history this window needs
+        fin = sliding_distinct_max(e_w.select(F.col("dst").alias("acct"), F.col("src").alias("cp"), "ts"),
                                    ["acct"], "cp", W, f"fanin_max_{w}d")
-        fout = sliding_distinct_max(edges.select(F.col("src").alias("acct"), F.col("dst").alias("cp"), "ts"),
+        fout = sliding_distinct_max(e_w.select(F.col("src").alias("acct"), F.col("dst").alias("cp"), "ts"),
                                     ["acct"], "cp", W, f"fanout_max_{w}d")
-        gs = gather_scatter_max(edges, W, f"gs_max_{w}d")
+        gs = gather_scatter_max(e_w, W, f"gs_max_{w}d")
         feats = (feats.join(fin, ["acct", "date"], "left")
                       .join(fout, ["acct", "date"], "left")
                       .join(gs, ["acct", "date"], "left"))
@@ -416,10 +449,10 @@ def main():
     if USE_SCATTER_GATHER or USE_CYCLES:
         small = non_hub_edges(edges).persist(DISK)
         if USE_SCATTER_GATHER:
-            feats = feats.join(scatter_gather_features(small), ["acct", "date"], "left")
+            feats = feats.join(scatter_gather_features(since(small, 2 * SG_WINDOW_DAYS)), ["acct", "date"], "left")
             graph_cols += ["sg_src_max", "sg_dst_max", "hop2_out", "hop2_in", "mid_paths"]
         if USE_CYCLES:
-            feats = feats.join(cycle_features(small), ["acct", "date"], "left")
+            feats = feats.join(cycle_features(since(small, CYCLE_WINDOW_DAYS + 6)), ["acct", "date"], "left")
             feats = feats.fillna(0, subset=["cycles_today"])
             # from the cached daily table (same dates as feats): asking feats itself ran the
             # whole uncached feature plan once extra just to find this date
@@ -455,10 +488,10 @@ def main():
     path = f"{CURATED}/{FEATURES_TABLE}"
     # rebalance, not repartition: by week alone one task wrote each week while the other cores
     # idled; rebalance lets AQE split big weeks across tasks and merge small ones
-    features.hint("rebalance", "dataset", "week").write.mode("overwrite") \
+    rebalance(features, "dataset", "week").write.mode("overwrite") \
             .partitionBy("dataset", "week").parquet(path)
     sample = features.filter((F.col("label") == 1) | (F.rand(RANDOM_SEED) < NEG_SAMPLE_RATE))
-    sample.hint("rebalance", "dataset", "week").write.mode("overwrite") \
+    rebalance(sample, "dataset", "week").write.mode("overwrite") \
           .partitionBy("dataset", "week").parquet(f"{CURATED}/{FEATURES_TABLE}_sample")
 
     by_label = {r["label"]: r["count"] for r in features.groupBy("label").count().collect()}

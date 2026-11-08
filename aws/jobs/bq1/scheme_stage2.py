@@ -113,10 +113,11 @@ def load_table(name, flt=None):
                       schema=schema).to_table(filter=flt).to_pandas()
 
 
-def write_results(df, name, config):
+def write_results(df, name, config, extra_parts=()):
+    """extra_parts: more string partition columns already in df (e.g. run_date for daily runs)."""
     fs, path = fs_path(f"{ANALYTICS}/{name}")
     df = df.assign(config=config)
-    part = ds.partitioning(pa.schema([("dataset", pa.string()), ("config", pa.string())]),
+    part = ds.partitioning(pa.schema([(c, pa.string()) for c in ("dataset", "config", *extra_parts)]),
                            flavor="hive")
     ds.write_dataset(pa.Table.from_pandas(df, preserve_index=False), path, filesystem=fs,
                      format="parquet", partitioning=part,

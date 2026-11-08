@@ -42,6 +42,12 @@ DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
 FEATURES_TABLE = sys.argv[2] if len(sys.argv) > 2 else "features_v2"
 CHUNK_FROM = sys.argv[3] if len(sys.argv) > 3 else None    # optional chunk (inclusive dates)
 CHUNK_TO = sys.argv[4] if len(sys.argv) > 4 else None
+# Daily mode (Step Functions aml-daily): with no chunk given, build the week of AML_RUN_DATE so far
+# (Monday to that day). The chunk still reads its look-back history and rewrites only that week.
+if os.environ.get("AML_RUN_DATE") and not CHUNK_FROM:
+    import datetime as _dt
+    _d = _dt.date.fromisoformat(os.environ["AML_RUN_DATE"])
+    CHUNK_FROM, CHUNK_TO = (_d - _dt.timedelta(days=_d.weekday())).isoformat(), _d.isoformat()
 
 # Full rows are written only from this day on (validation + test). None = every day (HI-Large).
 # These match train_ml.py's cross_dataset split (last 25% of days = validation).
@@ -59,6 +65,14 @@ META = ["dataset", "week", "acct_bank", "acct", "date", "label", "first_launderi
 FORMATS = ["ACH", "Bitcoin", "Cash", "Cheque", "Credit Card", "Reinvestment", "Wire"]
 
 spark = SparkSession.builder.appName(f"BuildTxnFeatures-{DATASET}").getOrCreate()
+
+
+def rebalance(df, *cols):
+    """REBALANCE hint in SQL form: works on Spark 3.2+ (EMR 7, local 3.5) and 4.x (EMR Serverless 8).
+    df.hint("rebalance", "col", ...) only works on Spark 4 (3.5 passes the names as strings and fails)."""
+    view = f"_rebalance_{id(df)}"
+    df.createOrReplaceTempView(view)
+    return spark.sql(f"SELECT /*+ REBALANCE({', '.join(cols)}) */ * FROM {view}")
 spark.sparkContext.setLogLevel("WARN")
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 spark.conf.set("spark.sql.adaptive.enabled", "true")
@@ -68,7 +82,10 @@ spark.conf.set("spark.sql.ansi.enabled", "false")
 
 def main():
     all_tx = spark.read.parquet(f"{CURATED}/transactions").filter(F.col("dataset") == DATASET)
-    med = all_tx.groupBy("payment_currency").agg(
+    med_base = all_tx       # median per currency: a chunk uses only payments up to its last day
+    if CHUNK_TO:
+        med_base = med_base.filter(F.col("txn_date") <= F.lit(CHUNK_TO).cast("date"))
+    med = med_base.groupBy("payment_currency").agg(
         F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
     tx = all_tx
     if CHUNK_FROM:     # read PAIR_DAYS of history before the chunk, write only the chunk
@@ -139,11 +156,11 @@ def main():
     sample = out.filter((F.col("label") == 1) | (F.rand(RANDOM_SEED) < NEG_SAMPLE_RATE))
     # rebalance, not repartition: by week alone one task wrote each week while the other cores
     # idled; rebalance lets AQE split big weeks across tasks and merge small ones
-    sample.hint("rebalance", "dataset", "week").write.mode("overwrite") \
+    rebalance(sample, "dataset", "week").write.mode("overwrite") \
           .partitionBy("dataset", "week").parquet(f"{CURATED}/txn_features_sample")
     full_from = FULL_FROM.get(DATASET)
     full = out.filter(F.col("date") >= F.lit(full_from).cast("date")) if full_from else out
-    full.hint("rebalance", "dataset", "week").write.mode("overwrite") \
+    rebalance(full, "dataset", "week").write.mode("overwrite") \
         .partitionBy("dataset", "week").parquet(f"{CURATED}/txn_features")
 
     n = out.count()

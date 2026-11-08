@@ -49,6 +49,11 @@ def pattern_label(typology):
 
 
 EMERGING_LABELS = [pattern_label(t) for t in EMERGING]
+# HI-Large new-tactic test (bq2_ibm_*): the "emerging" group is IBM pattern labels instead, e.g.
+# BQ2_EMERGING=fan_in,fan_out and BQ2_FIRST_DOSE=<day they appear>. Unset = the SAML-D settings above.
+if os.environ.get("BQ2_EMERGING"):
+    EMERGING_LABELS = [x for x in os.environ["BQ2_EMERGING"].split(",") if x]
+FIRST_DOSE = os.environ.get("BQ2_FIRST_DOSE", FIRST_DOSE)
 
 
 def group_of(pattern):

@@ -60,6 +60,12 @@ ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never w
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
 CHUNK_FROM = sys.argv[2] if len(sys.argv) > 2 else None    # optional chunk, inclusive dates
 CHUNK_TO = sys.argv[3] if len(sys.argv) > 3 else None      # (HI-Large: two weeks at a time)
+# Daily mode (Step Functions aml-daily): with no chunk given, build the week of AML_RUN_DATE so far
+# (Monday to that day). The chunk still reads its look-back history and rewrites only that week.
+if os.environ.get("AML_RUN_DATE") and not CHUNK_FROM:
+    import datetime as _dt
+    _d = _dt.date.fromisoformat(os.environ["AML_RUN_DATE"])
+    CHUNK_FROM, CHUNK_TO = (_d - _dt.timedelta(days=_d.weekday())).isoformat(), _d.isoformat()
 LOOKBACK_DAYS = 21                                         # history read before a chunk
 SRC_FEATURES, SRC_TXN = "features_v2", "txn_features"
 OUT_FEATURES, OUT_TXN = "features_v3", "txn_features_v3"
@@ -78,6 +84,14 @@ OWNER_TYPES = {"corporation": "Corporation", "partnership": "Partnership",
                "country": "Country", "direct": "Direct"}
 
 spark = SparkSession.builder.appName(f"BuildFeaturesV3-{DATASET}").getOrCreate()
+
+
+def rebalance(df, *cols):
+    """REBALANCE hint in SQL form: works on Spark 3.2+ (EMR 7, local 3.5) and 4.x (EMR Serverless 8).
+    df.hint("rebalance", "col", ...) only works on Spark 4 (3.5 passes the names as strings and fails)."""
+    view = f"_rebalance_{id(df)}"
+    df.createOrReplaceTempView(view)
+    return spark.sql(f"SELECT /*+ REBALANCE({', '.join(cols)}) */ * FROM {view}")
 spark.sparkContext.setLogLevel("WARN")
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 spark.conf.set("spark.sql.adaptive.enabled", "true")
@@ -117,9 +131,12 @@ def load_accounts():
 
 def main():
     tx = spark.read.parquet(f"{CURATED}/transactions").filter(F.col("dataset") == DATASET)
-    med = tx.groupBy("payment_currency").agg(
+    med_base = tx           # median per currency: a chunk uses only payments up to its last day
+    if CHUNK_TO:
+        med_base = med_base.filter(F.col("txn_date") <= F.lit(CHUNK_TO).cast("date"))
+    med = med_base.groupBy("payment_currency").agg(
         F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
-    medr = tx.groupBy("receiving_currency").agg(
+    medr = med_base.groupBy("receiving_currency").agg(
         F.expr("percentile_approx(amount_received, 0.5)").cast("double").alias("med_recv"))
     if CHUNK_FROM:
         tx = tx.filter((F.col("txn_date") >= F.date_sub(F.lit(CHUNK_FROM).cast("date"), LOOKBACK_DAYS))
@@ -194,7 +211,7 @@ def main():
         f = f.join(extras, ["acct_bank", "acct", "date"], "left").fillna(
             {c: v for c, v in fill.items()})
         # rebalance: AQE splits big weeks across tasks and merges small ones
-        f.hint("rebalance", "dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
+        rebalance(f, "dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
          .parquet(f"{CURATED}/{out_t}")
     chunk = f" {CHUNK_FROM} to {CHUNK_TO}" if CHUNK_FROM else ""
     print(f"[v3] {DATASET}{chunk}: wrote {OUT_FEATURES} (+_sample): {SRC_FEATURES} + {len(extra_cols)} columns")
@@ -226,7 +243,7 @@ def main():
         q = (q.join(p, "txn_id", "left").join(sx, ["s_id", "date"], "left").join(rx, ["r_id", "date"], "left")
               .fillna({**sfill, "t_same_owner": 0.0, "t_cross_country": 0.0, "t_amt_vs_sender": 0.0,
                        "t_amt_vs_receiver": 0.0, "t_sender_new": 0.0}))
-        q.hint("rebalance", "dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
+        rebalance(q, "dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \
          .parquet(f"{CURATED}/{out_t}")
     n_same = p.filter("t_same_owner = 1").count()
     print(f"[v3] {DATASET}{chunk}: wrote {OUT_TXN} (+_sample): {SRC_TXN} + 5 payment + {2 * len(extra_cols)} "

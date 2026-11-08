@@ -37,6 +37,11 @@ DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Large"
 DATE_FROM = sys.argv[2] if len(sys.argv) > 2 else None    # optional: test on these dates only
 DATE_TO = sys.argv[3] if len(sys.argv) > 3 else None      # (inclusive), e.g. to fit a budget
 RUN = os.environ.get("AML_FINAL_RUN", "final")     # a named final run keeps its own models + tables
+# Daily mode (Step Functions aml-daily): score one day and keep it in the live_* tables, one partition per
+# day, so the full-test final_* tables are never touched. Unset = the one-off evaluation run, as before.
+RUN_DATE = os.environ.get("AML_RUN_DATE")
+if RUN_DATE and not DATE_FROM:
+    DATE_FROM = DATE_TO = RUN_DATE
 MODEL_DIR = f"{ROOT}/models/{RUN}"
 TOP_K = [100, 250, 500, 1000, 2000, 5000]
 PATTERNS = ["fan_in", "fan_out", "gather_scatter", "scatter_gather", "cycle", "bipartite", "stack", "random"]
@@ -58,12 +63,18 @@ def text(path):
 
 
 def table(name):
-    """final_results -> final_<RUN>_results for a named run (FINAL_NAME in rebuild_final.sh)."""
+    """final_results -> final_<RUN>_results for a named run (FINAL_NAME in rebuild_final.sh);
+    live_results in daily mode."""
+    if RUN_DATE:
+        return f"live_{name[len('final_'):]}"
     return name if RUN == "final" else f"final_{RUN}_{name[len('final_'):]}"
 
 
 def write(df, name, parts=("dataset",)):
-    df.withColumn("dataset", F.lit(DATASET)).repartition(*parts).write.mode("overwrite") \
+    df = df.withColumn("dataset", F.lit(DATASET))
+    if RUN_DATE:                              # daily mode: each day is its own partition (dynamic overwrite)
+        df, parts = df.withColumn("run_date", F.lit(RUN_DATE)), (*parts, "run_date")
+    df.repartition(*parts).write.mode("overwrite") \
       .partitionBy(*parts).parquet(f"{ANALYTICS}/{table(name)}")
 
 

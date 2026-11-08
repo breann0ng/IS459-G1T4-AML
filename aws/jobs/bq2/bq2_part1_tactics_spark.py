@@ -55,6 +55,11 @@ BASE_TO = sys.argv[3] if len(sys.argv) > 3 else "2023-01-29"
 TAG = sys.argv[4] if len(sys.argv) > 4 else ""      # e.g. _nb: new-baseline run, written to separate tables
 TAG = "" if TAG == "-" else TAG                     # "-" = no tag
 AS_OF = sys.argv[5] if len(sys.argv) > 5 else ""    # weekly replay: only payments up to this date (YYYY-MM-DD)
+# Optional new-tactic test on a dataset whose tactics do not change (HI-Large): the laundering of
+# these patterns is left out of every week before HIDE_BEFORE, so to Part 1 they look brand new
+# from that day (e.g. BQ2_HIDE=fan_in,fan_out BQ2_HIDE_BEFORE=2022-10-03, tag _nt). Unset = off.
+HIDE = [x for x in os.environ.get("BQ2_HIDE", "").split(",") if x]
+HIDE_BEFORE = os.environ.get("BQ2_HIDE_BEFORE", "")
 JS_MIN = 0.10          # js below this is never a change, whatever the noise
 P_MAX = 0.01           # chi-square p-value must be below this
 EPS = 0.001            # PSI smoothing
@@ -100,6 +105,10 @@ def weekly_counts():
                    (F.col("from_bank") != F.col("to_bank")).cast("string").alias("cross_bank"),
                    F.when(hour < 6, "00-05").when(hour < 12, "06-11").when(hour < 18, "12-17")
                     .otherwise("18-23").alias("hour")))
+    if HIDE and HIDE_BEFORE:
+        t = t.filter(~((F.col("population") == "laundering") & F.col("pattern").isin(HIDE)
+                       & (F.col("week_start") < F.lit(HIDE_BEFORE))))
+        print(f"[part1] new-tactic test: laundering of {HIDE} left out before {HIDE_BEFORE}")
     c = t.groupBy("week_start", "population", *DIMS).count().toPandas()
     long = []
     for d in DIMS:

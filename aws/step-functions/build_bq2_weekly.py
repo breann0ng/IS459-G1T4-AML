@@ -26,6 +26,7 @@ ap.add_argument("--label-only-weeks", type=int, default=0,
 ap.add_argument("--base-from", default="2022-10-03")
 ap.add_argument("--base-to", default="2023-01-29")
 ap.add_argument("--dataset", default="SAML-R")
+ap.add_argument("--dashboard-url", default="", help="optional: the approval emails link to <url>/?approve=<dataset>")
 ap.add_argument("--out", default="aws/step-functions/aml_bq2_weekly.json")
 a = ap.parse_args()
 
@@ -94,6 +95,8 @@ def approval(gate, text, nxt, on_reject, extra_ctx=None):
 
 
 def notify(subject, text, nxt):
+    if a.dashboard_url:          # the link opens the approval page for this dataset's waiting request
+        text += f" Review and decide: {a.dashboard_url.rstrip('/')}/?approve={a.dataset}"
     return {"Type": "Task", "Resource": "arn:aws:states:::sns:publish",
             "Parameters": {"TopicArn": a.topic_arn, "Subject": subject,
                            "Message.$": f"States.Format('{text}', $.dataset, $.week_end)"},

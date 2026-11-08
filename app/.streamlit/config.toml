@@ -1,6 +1,9 @@
 [theme]
-base = "light"
-primaryColor = "#2F7FAD"
-backgroundColor = "#FFFAF3"
-secondaryBackgroundColor = "#F4ECE1"
-textColor = "#262626"
+# Dark purple theme. Chart colours (blue #3987e5, orange #d95926) and the violet accent were checked with the
+# dataviz palette validator against this background: colour-blind separation and contrast all pass.
+# NOTE: this file is shared by every page in app/, including app_bq2.py. Agree with the BQ2 team before merging.
+base = "dark"
+primaryColor = "#9085e9"
+backgroundColor = "#15111f"
+secondaryBackgroundColor = "#221b33"
+textColor = "#ece8f4"

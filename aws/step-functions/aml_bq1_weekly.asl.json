@@ -1,0 +1,616 @@
+{
+  "Comment": "AML BQ1 weekly: one weekly bank file -> clean -> features -> score -> name patterns. Started by the EventBridge rule on raw/transactions/set=<dataset>/week=<Monday>/_SUCCESS, or by hand with {\"dataset\": \"HI-Large-live\", \"week_start\": \"2022-09-12\"} (add \"force\": true to rerun a finished week). ${bucket}, ${application_id}, ${job_role_arn} are filled in by Terraform (templatefile).",
+  "QueryLanguage": "JSONata",
+  "StartAt": "ParseInput",
+  "States": {
+    "ParseInput": {
+      "Type": "Pass",
+      "Comment": "Dataset + week from the S3 key (EventBridge) or from the input (manual run). Optional input \"code\": the bucket folder with the job scripts (default: the dataset's, else jobs). Optional \"start_at\": \"Score\" or \"NamePatterns\" reruns only the end of a week whose features already exist.",
+      "Assign": {
+        "dataset": "{% $exists($states.input.dataset) ? $states.input.dataset : $substringAfter($split($states.input.detail.object.key, '/')[2], 'set=') %}",
+        "week_start": "{% $exists($states.input.week_start) ? $states.input.week_start : $substringAfter($split($states.input.detail.object.key, '/')[3], 'week=') %}",
+        "force": "{% $exists($states.input.force) ? $states.input.force = true : false %}",
+        "datasets": {
+          "HI-Large-live": {
+            "first_week": "2022-08-22",
+            "score_from": "2022-09-12",
+            "code": "jobs",
+            "model": "bq1"
+          },
+          "HI-Medium-live": {
+            "first_week": "2022-08-29",
+            "score_from": "2022-09-12",
+            "code": "dev/breann/jobs",
+            "model": "bq1"
+          }
+        },
+        "code_in": "{% $exists($states.input.code) ? $states.input.code : '' %}",
+        "model_in": "{% $exists($states.input.model) ? $states.input.model : '' %}",
+        "start_at": "{% $exists($states.input.start_at) ? $states.input.start_at : '' %}"
+      },
+      "Next": "ValidInput?"
+    },
+    "ValidInput?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $exists($lookup($datasets, $dataset)) and $contains($week_start, /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/) %}",
+          "Next": "Setup"
+        }
+      ],
+      "Default": "BadInput"
+    },
+    "BadInput": {
+      "Type": "Fail",
+      "Error": "BadInput",
+      "Cause": "{% 'Unknown dataset or week: ' & $string($dataset) & ' / ' & $string($week_start) & '. Datasets: ' & $join($keys($datasets), ', ') %}"
+    },
+    "Setup": {
+      "Type": "Pass",
+      "Comment": "Week end (Sunday), previous week, run-log keys and the Spark settings every job shares.",
+      "Assign": {
+        "cfg": "{% $lookup($datasets, $dataset) %}",
+        "week_end": "{% $fromMillis($toMillis($week_start & 'T00:00:00Z') + 6 * 86400000, '[Y0001]-[M01]-[D01]') %}",
+        "prev_week": "{% $fromMillis($toMillis($week_start & 'T00:00:00Z') - 7 * 86400000, '[Y0001]-[M01]-[D01]') %}",
+        "model_ready": false,
+        "log_key": "{% 'progress/bq1_weekly/' & $dataset & '/' & $week_start & '.json' %}",
+        "prev_key": "{% 'progress/bq1_weekly/' & $dataset & '/' & $fromMillis($toMillis($week_start & 'T00:00:00Z') - 7 * 86400000, '[Y0001]-[M01]-[D01]') & '.json' %}",
+        "code": "{% $code_in != '' ? $code_in : ($exists($lookup($datasets, $dataset).code) ? $lookup($datasets, $dataset).code : 'jobs') %}",
+        "model": "{% $model_in != '' ? $model_in : ($exists($lookup($datasets, $dataset).model) ? $lookup($datasets, $dataset).model : 'final') %}"
+      },
+      "Next": "SparkSettings"
+    },
+    "SparkSettings": {
+      "Type": "Pass",
+      "Comment": "Spark settings every job shares. Code (entry scripts + jobs.zip) from $code; the Python venv is always the team's jobs/venv.tar.gz. Sizes follow local/runs/run_final_serverless.py (SPARK, DRIVER_ONLY), plus 100 GB executor disk and a 16 GB (+4 GB overhead) driver: the 20 GB default ran out during features_v2 shuffles on HI-Medium, and the 12 GB driver was killed by its long cycle-search plan (2026-11-08). Total 20 + 3 x 14 = 62 GB, under the app's 64 GB. AML_SHUFFLE=120: shuffle partitions for one week of data (the scripts default to 400, sized for whole datasets).",
+      "Assign": {
+        "spark": "{% '--py-files s3://${bucket}/' & $code & '/jobs.zip --conf spark.archives=s3://${bucket}/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://${bucket} --conf spark.executorEnv.AML_ROOT=s3://${bucket} --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.emr-serverless.driverEnv.AML_SHUFFLE=120 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=16g --conf spark.driver.memoryOverhead=4g --conf spark.driver.maxResultSize=2g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=4g --conf spark.emr-serverless.executor.disk=100g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.sql.autoBroadcastJoinThreshold=-1' %}",
+        "driver_only": "{% '--py-files s3://${bucket}/' & $code & '/jobs.zip --conf spark.archives=s3://${bucket}/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://${bucket} --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=8 --conf spark.driver.memory=48g --conf spark.emr-serverless.driver.disk=100g --conf spark.executor.instances=1 --conf spark.executor.cores=1 --conf spark.executor.memory=2g --conf spark.dynamicAllocation.initialExecutors=1 --conf spark.dynamicAllocation.minExecutors=0 --conf spark.dynamicAllocation.maxExecutors=1' %}"
+      },
+      "Next": "ReadRunLog"
+    },
+    "ReadRunLog": {
+      "Type": "Task",
+      "Comment": "Has this week already run? No log yet (or unreadable) = never ran.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Arguments": {
+        "Bucket": "${bucket}",
+        "Key": "{% $log_key %}"
+      },
+      "Assign": {
+        "prev_status": "{% ( $p := $parse($states.result.Body); ($type($p) = 'string' ? $parse($p) : $p).status ) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "prev_status": "NONE"
+          },
+          "Next": "AlreadyDone?"
+        }
+      ],
+      "Next": "AlreadyDone?"
+    },
+    "AlreadyDone?": {
+      "Type": "Choice",
+      "Comment": "Skip a week that is running or done (a duplicate S3 event or a second replay), unless force.",
+      "Choices": [
+        {
+          "Condition": "{% $not($force) and $prev_status in ['RUNNING', 'SUCCEEDED'] %}",
+          "Next": "Skip"
+        }
+      ],
+      "Default": "FirstWeek?"
+    },
+    "Skip": {
+      "Type": "Succeed",
+      "Output": {
+        "dataset": "{% $dataset %}",
+        "week_start": "{% $week_start %}",
+        "skipped_because": "{% $prev_status %}"
+      }
+    },
+    "FirstWeek?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $week_start = $cfg.first_week %}",
+          "Next": "LogStart"
+        }
+      ],
+      "Default": "ReadPrevWeekLog"
+    },
+    "ReadPrevWeekLog": {
+      "Type": "Task",
+      "Comment": "Features read the weeks before this one, so the previous week must be done first.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Arguments": {
+        "Bucket": "${bucket}",
+        "Key": "{% $prev_key %}"
+      },
+      "Assign": {
+        "prev_week_status": "{% ( $p := $parse($states.result.Body); ($type($p) = 'string' ? $parse($p) : $p).status ) %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "prev_week_status": "NONE"
+          },
+          "Next": "PrevWeekDone?"
+        }
+      ],
+      "Next": "PrevWeekDone?"
+    },
+    "PrevWeekDone?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $prev_week_status = 'SUCCEEDED' %}",
+          "Next": "LogStart"
+        }
+      ],
+      "Default": "PrevWeekNotDone"
+    },
+    "PrevWeekNotDone": {
+      "Type": "Fail",
+      "Error": "PreviousWeekNotDone",
+      "Cause": "{% 'Week ' & $prev_week & ' of ' & $dataset & ' is ' & $prev_week_status & ', not SUCCEEDED. Replay it first (replay_week.py --wait), then this week again.' %}"
+    },
+    "LogStart": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "${bucket}",
+        "Key": "{% $log_key %}",
+        "ContentType": "application/json",
+        "Body": "{% $string({'dataset': $dataset, 'week_start': $week_start, 'week_end': $week_end, 'status': 'RUNNING', 'start_at': $start_at, 'code': $code, 'model': $model, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime}) %}"
+      },
+      "Next": "SkipToScoring?"
+    },
+    "SkipToScoring?": {
+      "Type": "Choice",
+      "Comment": "start_at = Score / NamePatterns: skip clean + features (they must already exist for this week).",
+      "Choices": [
+        {
+          "Condition": "{% $start_at in ['Score', 'NamePatterns'] %}",
+          "Next": "CheckModel"
+        }
+      ],
+      "Default": "Clean"
+    },
+    "Clean": {
+      "Type": "Task",
+      "Comment": "Only this week's file: type-safe read, quarantine bad rows, curated/transactions + labels for this week.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "${application_id}",
+        "ExecutionRoleArn": "${job_role_arn}",
+        "Name": "{% 'bq1-clean-' & $dataset & '-' & $week_start %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 60,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://${bucket}/' & $code & '/clean_transactions_spark.py' %}",
+            "EntryPointArguments": "{% [$dataset, $week_start] %}",
+            "SparkSubmitParameters": "{% $spark %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://${bucket}/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "failed_step": "Clean",
+            "error": "{% $states.errorOutput %}"
+          },
+          "Next": "LogFailure"
+        }
+      ],
+      "Next": "ParsePatterns"
+    },
+    "ParsePatterns": {
+      "Type": "Task",
+      "Comment": "Answer key -> scheme_txns, re-linked now that this week's payments are clean. Used for grading only, never as model input.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "${application_id}",
+        "ExecutionRoleArn": "${job_role_arn}",
+        "Name": "{% 'bq1-patterns-' & $dataset & '-' & $week_start %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 60,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://${bucket}/' & $code & '/parse_patterns_spark.py' %}",
+            "EntryPointArguments": "{% [$dataset] %}",
+            "SparkSubmitParameters": "{% $spark %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://${bucket}/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "failed_step": "ParsePatterns",
+            "error": "{% $states.errorOutput %}"
+          },
+          "Next": "LogFailure"
+        }
+      ],
+      "Next": "HistoryOnly?"
+    },
+    "HistoryOnly?": {
+      "Type": "Choice",
+      "Comment": "Weeks before score_from are look-back history: features only need their clean payments.",
+      "Choices": [
+        {
+          "Condition": "{% $week_end < $cfg.score_from %}",
+          "Next": "LogSuccess"
+        }
+      ],
+      "Default": "FeaturesV2"
+    },
+    "FeaturesV2": {
+      "Type": "Task",
+      "Comment": "Account-day features for this week, reading 21 days of history before it.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "${application_id}",
+        "ExecutionRoleArn": "${job_role_arn}",
+        "Name": "{% 'bq1-features-v2-' & $dataset & '-' & $week_start %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 90,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://${bucket}/' & $code & '/build_features_spark.py' %}",
+            "EntryPointArguments": "{% [$dataset, $week_start, $week_end] %}",
+            "SparkSubmitParameters": "{% $spark %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://${bucket}/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "failed_step": "FeaturesV2",
+            "error": "{% $states.errorOutput %}"
+          },
+          "Next": "LogFailure"
+        }
+      ],
+      "Next": "TxnFeatures"
+    },
+    "TxnFeatures": {
+      "Type": "Task",
+      "Comment": "Per-payment features for this week (sender/receiver account-day features joined on).",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "${application_id}",
+        "ExecutionRoleArn": "${job_role_arn}",
+        "Name": "{% 'bq1-features-txn-' & $dataset & '-' & $week_start %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 90,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://${bucket}/' & $code & '/build_txn_features_spark.py' %}",
+            "EntryPointArguments": "{% [$dataset, 'features_v2', $week_start, $week_end] %}",
+            "SparkSubmitParameters": "{% $spark %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://${bucket}/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "failed_step": "TxnFeatures",
+            "error": "{% $states.errorOutput %}"
+          },
+          "Next": "LogFailure"
+        }
+      ],
+      "Next": "FeaturesV3"
+    },
+    "FeaturesV3": {
+      "Type": "Task",
+      "Comment": "v3 extras (owners, history, counterparties): features_v3 (78) + txn_features_v3 (179) for this week.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "${application_id}",
+        "ExecutionRoleArn": "${job_role_arn}",
+        "Name": "{% 'bq1-features-v3-' & $dataset & '-' & $week_start %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 90,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://${bucket}/' & $code & '/build_features_v3_spark.py' %}",
+            "EntryPointArguments": "{% [$dataset, $week_start, $week_end] %}",
+            "SparkSubmitParameters": "{% $spark %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://${bucket}/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "failed_step": "FeaturesV3",
+            "error": "{% $states.errorOutput %}"
+          },
+          "Next": "LogFailure"
+        }
+      ],
+      "Next": "CheckModel"
+    },
+    "CheckModel": {
+      "Type": "Task",
+      "Comment": "Score + name need the frozen stage 1 model and group namer in models/<model>/ (the dataset's \"model\", e.g. bq1 = En Rui's txn_v3m_xp + enrui_breann_mld20_grp). Until both are there, a week stops after features (scored: false) and scoring switches on by itself once they are uploaded.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:listObjectsV2",
+      "Arguments": {
+        "Bucket": "${bucket}",
+        "Prefix": "{% 'models/' & $model & '/' %}"
+      },
+      "Assign": {
+        "model_ready": "{% $exists($states.result.Contents) and ('models/' & $model & '/stage1.txt') in $states.result.Contents.Key and ('models/' & $model & '/namer_group.txt') in $states.result.Contents.Key %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "failed_step": "CheckModel",
+            "error": "{% $states.errorOutput %}"
+          },
+          "Next": "LogFailure"
+        }
+      ],
+      "Next": "ModelReady?"
+    },
+    "ModelReady?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $model_ready and $start_at = 'NamePatterns' %}",
+          "Next": "NamePatterns"
+        },
+        {
+          "Condition": "{% $model_ready %}",
+          "Next": "Score"
+        }
+      ],
+      "Default": "LogSuccess"
+    },
+    "Score": {
+      "Type": "Task",
+      "Comment": "Frozen stage 1 model on this week's payments, rolled up to account-day alerts. AML_RUN_DATE = the Monday: writes analytics/live_* (one run_date partition per week); the full-evaluation final_* tables are never touched.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "${application_id}",
+        "ExecutionRoleArn": "${job_role_arn}",
+        "Name": "{% 'bq1-score-' & $dataset & '-' & $week_start %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 90,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://${bucket}/' & $code & '/score_final_spark.py' %}",
+            "EntryPointArguments": "{% [$dataset, $week_start, $week_end] %}",
+            "SparkSubmitParameters": "{% $spark & ' --conf spark.emr-serverless.driverEnv.AML_RUN_DATE=' & $week_start & ' --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=' & $model %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://${bucket}/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "failed_step": "Score",
+            "error": "{% $states.errorOutput %}"
+          },
+          "Next": "LogFailure"
+        }
+      ],
+      "Next": "NamePatterns"
+    },
+    "NamePatterns": {
+      "Type": "Task",
+      "Comment": "Frozen group namer (plain Python on the driver): names this week's alerts, linking back up to max_linked_days of earlier alerts; writes live_alerts_named (the analyst list) for this week.",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+      "Arguments": {
+        "ApplicationId": "${application_id}",
+        "ExecutionRoleArn": "${job_role_arn}",
+        "Name": "{% 'bq1-name-' & $dataset & '-' & $week_start %}",
+        "ClientToken": "{% $uuid() %}",
+        "ExecutionTimeoutMinutes": 60,
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint": "{% 's3://${bucket}/' & $code & '/final_group_namer.py' %}",
+            "EntryPointArguments": "{% [$dataset] %}",
+            "SparkSubmitParameters": "{% $driver_only & ' --conf spark.emr-serverless.driverEnv.AML_RUN_DATE=' & $week_start & ' --conf spark.emr-serverless.driverEnv.AML_RUN_TO=' & $week_end & ' --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=' & $model %}"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri": "s3://${bucket}/logs/emr_serverless/"
+            }
+          }
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 300,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Assign": {
+            "failed_step": "NamePatterns",
+            "error": "{% $states.errorOutput %}"
+          },
+          "Next": "LogFailure"
+        }
+      ],
+      "Next": "LogSuccess"
+    },
+    "LogSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "${bucket}",
+        "Key": "{% $log_key %}",
+        "ContentType": "application/json",
+        "Body": "{% $string({'dataset': $dataset, 'week_start': $week_start, 'week_end': $week_end, 'status': 'SUCCEEDED', 'scored': $model_ready, 'history_week': $week_end < $cfg.score_from, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'finished_at': $now()}) %}"
+      },
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed",
+      "Output": {
+        "dataset": "{% $dataset %}",
+        "week_start": "{% $week_start %}",
+        "week_end": "{% $week_end %}",
+        "scored": "{% $model_ready %}"
+      }
+    },
+    "LogFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Arguments": {
+        "Bucket": "${bucket}",
+        "Key": "{% $log_key %}",
+        "ContentType": "application/json",
+        "Body": "{% $string({'dataset': $dataset, 'week_start': $week_start, 'week_end': $week_end, 'status': 'FAILED', 'failed_step': $failed_step, 'error': $error, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'finished_at': $now()}) %}"
+      },
+      "Next": "Failed"
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $failed_step & 'Failed' %}",
+      "Cause": "{% $string($error) %}"
+    }
+  }
+}
