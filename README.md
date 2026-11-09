@@ -9,44 +9,45 @@ Details and results: [`docs/bq1.md`](docs/bq1.md) · [`docs/bq2.md`](docs/bq2.md
 
 ```
 aws/                      ★ DEPLOYED TO AWS
-  step-functions/           the state machines, exactly as deployed (start here: README.md)
-    aml_prepare               shared data stage: SAML-D convert · clean · patterns · features
-    aml_bq1_train             HI-Small + HI-Medium -> detector + namer -> quality gate -> champion
-    aml_bq1_score             HI-Large weekly files -> champion scores + names patterns
-    aml_bq2_weekly            SAML-R: tactic change, detection drop, retrain on alert
-    aml_bq2_weekly_ibm        HI-Large / HI-Large-NT (fan-in, fan-out hidden): same BQ2 rules
-    iam/ · inputs/ · legacy/  role policies, example inputs + EventBridge rules, old weekly machine
   jobs/                     code -> s3://<bucket>/jobs/ (one flat folder + jobs.zip), runs on EMR Serverless
-    prepare/                  every aml_prepare step: saml_ramp · clean · parse_patterns · 3 feature builders
+    setup/                    one-off, before a weekly feed starts: load_kaggle.sh · saml_ramp_spark.py
+                              (SAML-D -> IBM layout) · split_weeks_spark.py (whole file -> weekly files in staging/)
+    prepare/                  the aml_prepare steps: clean · parse_patterns · 3 feature builders
     bq1/                      train_txn · group_stage2 · final_train · score_final_spark · final_group_namer
                               scheme_stage2 · shape_rules · bq1_checks
     bq2/                      bq2_common · part1 tactics · part2 train/score/eval · deploy · HI-Large scoring
-  sql/                      Athena: ddl/ · views/ · run-log/ · maintenance/
-  infra/                    Terraform (EMR app, bucket, budgets, legacy weekly trigger)
-  config/pipeline.yaml      bucket, region, final model settings
+  orchestration/            how the jobs are run (start here: README.md)
+    state-machines/           aml_prepare · aml_bq1_train · aml_bq1_score · aml_bq2_weekly · aml_bq2_weekly_ibm
+    eventbridge/              week_arrived · data_prepared · run_failed: one event pattern per rule
+    examples/                 example inputs for starting a machine by hand
+  infra/                    Terraform: EMR apps, bucket, roles (policies/), state machines, rules, alerts, budget
+  athena/                   ddl/: tables the dashboard queries
   deploy/                   deploy.sh · build_venv.sh · requirements-jobs.txt
-app/                      ★ DEPLOYED TO STREAMLIT CLOUD
+app/                      ★ DEPLOYED TO EC2 (Streamlit dashboard)
 local/                    ✗ NEVER DEPLOYED
-  simulate/                 replay_week.py · replay_day.py: play "the bank" (staging/ -> raw/)
+  simulate/                 replay_week.py: plays "the bank" (one week staging/ -> raw/, starts aml_prepare)
   reports/                  final_report · txn_report · stage2_report · bq2_ramp_report · bq2_ibm_report
-  runs/                     deploy_branch.py · run_final_serverless.py
   experiments/              bq1_rounds/ · perf/
   analysis/                 notebooks, DuckDB cleaner
-  legacy-emr/               old EMR-cluster scripts (run_bq2_*.sh, rebuild_final.sh, ...)
 results/                  ✗ evidence for the report: final/ · experiments/ · bq2/
 docs/                     ✗ pipeline.md · bq1.md · bq2.md · improving_bq1.md · figures/
 ```
 
 How the datasets flow through the machines: [`docs/pipeline.md`](docs/pipeline.md).
+Only the training sets (HI-Small, HI-Medium) are processed whole. HI-Large and SAML arrive one week at a
+time, like a bank feed: `split_weeks_spark.py` stages the weeks once, then `replay_week.py` drops them into
+`raw/` one by one, and each `_SUCCESS` marker starts `aml_prepare`.
 
 | Folder | Deployed to | How |
 |---|---|---|
 | `aws/jobs/` | `s3://<bucket>/jobs/` -> EMR Serverless | `aws/deploy/deploy.sh` (from `main`) |
-| `aws/step-functions/` | Step Functions | `aws stepfunctions update-state-machine` (see its README) |
-| `aws/sql/` | Athena + Glue Data Catalog | by hand |
-| `aws/infra/` | EMR app, bucket, budgets, legacy weekly trigger | `terraform apply` |
-| `app/` | Streamlit Community Cloud | linked to this repo |
+| `aws/orchestration/`, `aws/infra/` | Step Functions, EventBridge, IAM, SNS, EMR apps, S3, Glue/Athena | `terraform apply` in `aws/infra/` |
+| `aws/athena/` | Athena | once, by hand |
+| `app/` | EC2 `aml-dashboard` | `aws/infra/dashboard_ec2.tf` |
 | `local/`, `results/`, `docs/` | nowhere | — |
+
+Retired code (old EMR-cluster scripts, the daily simulation, the single weekly state machine) is in git
+history before 9 Nov 2026.
 
 ## S3 bucket (data, never code you edit)
 
@@ -59,7 +60,7 @@ models/ (trained model files)  mlflow/  logs/  athena-results/
 
 En Rui's stage 1 with alert expansion (`txn_v3m_xp`) + stage 2 with context, group vote and
 Breann's longer cross-day linking (`enrui_breann_mld20`), on Breann's optimised Spark ETL.
-Exact commands: `aws/config/pipeline.yaml`. Baseline namers (`--baselines`) are experiments only.
+Training is `aml_bq1_train` (`aws/orchestration/examples/bq1_train.json`). Baseline namers (`--baselines`) are experiments only.
 
 ## Running locally
 

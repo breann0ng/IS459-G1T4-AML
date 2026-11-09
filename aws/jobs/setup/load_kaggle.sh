@@ -1,6 +1,6 @@
 #!/bin/bash
 # One-off: stream the IBM AML files from Kaggle straight into S3 raw/ (nothing on disk).
-# Taken from local/legacy-emr/rebuild_final.sh. Needs ~/.kaggle/kaggle.json (legacy token).
+# One-off setup (before any feed starts). Needs ~/.kaggle/kaggle.json (legacy token).
 #   AML_BUCKET=<bucket> bash load_kaggle.sh HI-Small HI-Medium HI-Large
 set -o pipefail
 BUCKET="${AML_BUCKET:?set AML_BUCKET}"; ROOT="s3://$BUCKET"

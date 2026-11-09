@@ -2,19 +2,20 @@
 #
 #   raw/transactions/set=<ds>/week=<Mon>/_SUCCESS --(aml-prepare-weekly-file)--> aml_prepare
 #       Clean -> ParsePatterns -> Features; marker progress/prepare/<ds>/<week>.json; emits DataPrepared
-#   DataPrepared (a *-live week with features) ------(aml-bq1-data-prepared)--> aml_bq1_score
+#   DataPrepared (an HI-*-live week with features) --(aml-bq1-data-prepared)--> aml_bq1_score
 #       Score -> Name -> WeekCheck -> Summary; writes analytics/live_*; run log progress/bq1/score/<execution>.json
 #   aml_bq1_train: started by hand; trains, gates and promotes models/bq1_champion.json
 #   aml-bq1-run-ended: an aml_prepare / aml_bq1_score run FAILED, TIMED_OUT or ABORTED -> email (aml-bq1-weekly-alerts)
 #
-# The state machine definitions are aws/step-functions/*.asl.json, used as they are (they carry the bucket,
-# account and EMR app ids literally, the same text as the console shows). The job code is s3://<bucket>/jobs/,
+# Definitions: aws/orchestration/state-machines/*.asl.json and the rules' event patterns
+# aws/orchestration/eventbridge/*.json, used as they are (they carry the bucket, account and EMR app ids
+# literally, the same text as the console shows). IAM policies: aws/infra/policies/. The job code is s3://<bucket>/jobs/,
 # deployed from main with aws/deploy/deploy.sh.
 # The three machines, their two roles and the two trigger rules were built with the CLI and adopted here with
 # import blocks (Terraform >= 1.5). Once applied, the import blocks are no-ops and can stay or go.
 #
 # Retired 2026-11-09 (removed from this file, so `terraform apply` deletes them): aml_bq1_weekly (one machine
-# for the whole week; definition kept in aws/step-functions/legacy/), its rule aml-bq1-weekly-file (already
+# for the whole week; its definition is in git history), its rule aml-bq1-weekly-file (already
 # disabled), the cleanup machine aml_bq1_abort and its rule aml-bq1-run-aborted, and their roles and log groups.
 #
 # BQ2: SAML-D (aml_bq2_weekly) is in bq2_weekly.tf. HI-Large (aml_bq2_weekly_ibm) is in bq2_weekly_ibm.tf on
@@ -24,7 +25,9 @@
 
 locals {
   account_id = data.aws_caller_identity.me.account_id
-  sfn_dir    = "${path.module}/../step-functions"
+  sfn_dir    = "${path.module}/../orchestration/state-machines"
+  rules_dir  = "${path.module}/../orchestration/eventbridge"
+  policy_dir = "${path.module}/policies"
 }
 
 # ---------------------------------------------------------------- BQ1's own EMR Serverless app
@@ -116,25 +119,25 @@ resource "aws_s3_bucket_notification" "lake" {
 # markers, the champion pointer, aml-bq1-alerts). aml-events-pipeline: EventBridge may start the two machines.
 resource "aws_iam_role" "sfn_pipeline" {
   name               = "aml-sfn-pipeline"
-  assume_role_policy = file("${local.sfn_dir}/iam/aml_pipeline_trust.json")
+  assume_role_policy = file("${local.policy_dir}/aml_pipeline_trust.json")
 }
 
 resource "aws_iam_role_policy" "sfn_pipeline" {
   name   = "aml-sfn-pipeline"
   role   = aws_iam_role.sfn_pipeline.id
-  policy = file("${local.sfn_dir}/iam/aml_pipeline_role_policy.json")
+  policy = file("${local.policy_dir}/aml_pipeline_role_policy.json")
 }
 
 resource "aws_iam_role" "events_pipeline" {
   name               = "aml-events-pipeline"
   description        = "EventBridge -> aml_prepare (weekly file) and aml_bq1_score (DataPrepared)"
-  assume_role_policy = file("${local.sfn_dir}/iam/aml_events_trust.json")
+  assume_role_policy = file("${local.policy_dir}/aml_events_trust.json")
 }
 
 resource "aws_iam_role_policy" "events_pipeline" {
   name   = "aml-events-pipeline"
   role   = aws_iam_role.events_pipeline.id
-  policy = file("${local.sfn_dir}/iam/aml_events_role_policy.json")
+  policy = file("${local.policy_dir}/aml_events_role_policy.json")
 }
 
 # ---------------------------------------------------------------- state machines
@@ -164,7 +167,7 @@ resource "aws_sfn_state_machine" "bq1_train" {
 resource "aws_cloudwatch_event_rule" "prepare_weekly_file" {
   name          = "aml-prepare-weekly-file"
   description   = "A weekly bank file finished landing in raw/transactions/set=<dataset>/week=<Monday>/: start aml_prepare (it emits DataPrepared)"
-  event_pattern = file("${local.sfn_dir}/inputs/eventbridge/rule_weekly_file.json")
+  event_pattern = file("${local.rules_dir}/week_arrived.json")
 }
 
 resource "aws_cloudwatch_event_target" "prepare_weekly_file" {
@@ -180,8 +183,8 @@ resource "aws_cloudwatch_event_target" "prepare_weekly_file" {
 
 resource "aws_cloudwatch_event_rule" "bq1_data_prepared" {
   name          = "aml-bq1-data-prepared"
-  description   = "aml_prepare finished a *-live week with features: start aml_bq1_score"
-  event_pattern = file("${local.sfn_dir}/inputs/eventbridge/rule_data_prepared.json")
+  description   = "aml_prepare finished an HI-*-live week with features: start aml_bq1_score (SAML weeks go to BQ2, never here)"
+  event_pattern = file("${local.rules_dir}/data_prepared.json")
 }
 
 resource "aws_cloudwatch_event_target" "bq1_data_prepared" {
@@ -231,14 +234,7 @@ resource "aws_sns_topic_subscription" "bq1_alerts_email" {
 resource "aws_cloudwatch_event_rule" "bq1_run_ended" {
   name        = "aml-bq1-run-ended"
   description = "An aml_prepare or aml_bq1_score run failed, timed out or was aborted: email the team (aml-bq1-weekly-alerts)"
-  event_pattern = jsonencode({
-    source        = ["aws.states"]
-    "detail-type" = ["Step Functions Execution Status Change"]
-    detail = {
-      status          = ["FAILED", "TIMED_OUT", "ABORTED"]
-      stateMachineArn = [aws_sfn_state_machine.prepare.arn, aws_sfn_state_machine.bq1_score.arn]
-    }
-  })
+  event_pattern = file("${local.rules_dir}/run_failed.json")
 }
 
 resource "aws_cloudwatch_event_target" "bq1_run_ended_email" {

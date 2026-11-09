@@ -1,5 +1,0 @@
-[{
-  "Id": "aml-bq1-score",
-  "Arn": "arn:aws:states:us-east-1:390402569482:stateMachine:aml_bq1_score",
-  "RoleArn": "arn:aws:iam::390402569482:role/aml-events-pipeline"
-}]

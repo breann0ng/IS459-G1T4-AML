@@ -1,6 +1,6 @@
 # IS459 G1T4 · BQ2: Are criminals changing their tactics, and is detection affected?
 
-> **Layout note (all-combined):** paths below are from the old EMR layout. `pipeline/` and `bq2/` scripts now live in `aws/jobs/<prepare|bq1|bq2>/`, reports in `local/reports/`, run scripts in `local/legacy-emr/`. To run the legacy EMR scripts, copy `aws/jobs/*/*` and `local/legacy-emr/*` into one folder on the primary node (`aws/deploy/deploy.sh` builds exactly that flat folder in `build/jobs/`). See the root README.
+> **Layout note:** paths below are from the old EMR-cluster layout, kept as a record of the experiments. The scripts now live in `aws/jobs/<setup|prepare|bq1|bq2>/` and run on EMR Serverless through the state machines in `aws/orchestration/`; reports are in `local/reports/`. See the root README.
 
 **BQ2:** Are criminals changing their laundering tactics over time, and when they do, does our detection rate fall, and can retraining recover it?
 
@@ -44,7 +44,7 @@ retraining with the confirmed cases gives. Both are graded with the **same** Par
 
 | Step | Script | Does |
 |---|---|---|
-| — | `local/legacy-emr/run_bq2_ibm.sh` | runs everything below; resumable (`progress/bq2/`) |
+| — | `aml_bq2_weekly_ibm` (state machine) | runs everything below; resumable (`progress/bq2/`) |
 | 1 | `bq2_ibm_score_spark.py` | per week: features (unchanged BQ1 steps) + scores with both models (Spark: ~13M payments a week) |
 | 2 | `bq2_part1_tactics_spark.py` | Part 1 on HI-Large, real data, then with `BQ2_HIDE=fan_in,fan_out BQ2_HIDE_BEFORE=2022-10-03` (tag `_nt`) |
 | 3 | `bq2_ibm_part2_prep_spark.py` | scores in Part 2's format (`analytics/bq2r_scores`, datasets `HI-Large` and `HI-Large-NT`) and each model's validation baseline (`models/bq2r/<ds>/<v>/meta.json`, HI-Small + HI-Medium validation days) |

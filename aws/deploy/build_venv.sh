@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build the Python environment every EMR Serverless job loads (replaces the EMR bootstrap action
-# local/legacy-emr/install_libs.sh). Built inside Amazon Linux so the libraries match EMR's OS.
+# Build the Python environment every EMR Serverless job loads (replaces the old EMR-cluster bootstrap
+# action). Built inside Amazon Linux so the libraries match EMR's OS.
 #   AML_BUCKET=<bucket> bash aws/deploy/build_venv.sh      (needs Docker)
 # Use the Python version of your EMR release and the same CPU type (x86_64 vs arm64) as the app.
 set -euo pipefail

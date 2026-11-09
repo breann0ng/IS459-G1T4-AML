@@ -1,0 +1,2 @@
+{"source": ["aml.prepare"], "detail-type": ["DataPrepared"],
+ "detail": {"features": [true], "dataset": [{"wildcard": "HI-*-live"}]}}

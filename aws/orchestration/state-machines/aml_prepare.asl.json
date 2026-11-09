@@ -1,5 +1,5 @@
 {
-  "Comment": "AML shared data stage, used by BQ1 (training + weekly scoring) and BQ2. One dataset, either whole (training sets) or one week (a weekly bank file): clean, then (when features are wanted) parse patterns -> features (features_v2 -> txn_features -> features_v3 in separate jobs). Idempotent: a marker in s3://is459-g1t4-aml/progress/prepare/<dataset>/<week|full>.json records what is done, so a second caller (BQ1 and BQ2 both asking for the same week) returns at once. Input: {\"dataset\": \"HI-Large-live\", \"week\": \"2022-09-12\"} or {\"dataset\": \"HI-Small\"} (whole file). Feature completion is scoped to feature_version (default set in Setup); missing or changed versions rebuild features without re-cleaning. Optional: feature_version, features (default true; false = clean only, for history weeks), force, check_previous (default true in week mode), emit (default false: publish a DataPrepared event for BQ1/BQ2 when done), app_id, code_prefix. Also accepts an EventBridge S3 'Object Created' event for raw/transactions/set=<dataset>/week=<Monday>/_SUCCESS. SAML: {\"dataset\": \"SAML-R\"} or \"SAML-C\" (whole only); SAML-D is converted to the IBM layout first when raw/ has none yet (convert: true forces it; one conversion writes both).",
+  "Comment": "AML shared data stage, used by BQ1 (training + weekly scoring) and BQ2. Like a bank: the training sets (HI-Small, HI-Medium) are prepared whole, and every other dataset (HI-Large*, SAML-*) arrives one week at a time. Steps: clean, then (when features are wanted) parse patterns -> features (features_v2, txn_features, features_v3). Idempotent: a marker in s3://is459-g1t4-aml/progress/prepare/<dataset>/<week|full>.json records what is done (and the feature_version that built it), so a second caller (BQ1 and BQ2 both asking for the same week) returns at once and an interrupted run resumes at its first unfinished stage. Input: {\"dataset\": \"HI-Large-live\", \"week\": \"2022-09-12\"}, {\"dataset\": \"SAML-R-demo\", \"week\": \"2023-01-30\"} or {\"dataset\": \"HI-Small\"} (whole). Optional: features (default true; false = clean only), force, force_features, feature_version, check_previous (default true in week mode: the previous week must be cleaned, unless it was never delivered, i.e. this is the first week of the feed), emit (default false: publish a DataPrepared event when done), app_id (default aml-bq1; *-demo datasets default to aml-bq1-dev), code_prefix. Also accepts an EventBridge S3 'Object Created' event for raw/transactions/set=<dataset>/week=<Monday>/_SUCCESS. SAML-D is converted to the IBM layout (saml_ramp_spark.py) and split into weeks (split_weeks_spark.py) once, before the weekly feed starts, exactly like HI-Large.",
   "QueryLanguage": "JSONata",
   "StartAt": "ParseInput",
   "States": {
@@ -23,7 +23,7 @@
         "force_features": "{% $exists($in.force_features) ? $in.force_features : false %}",
         "check_previous": "{% $exists($in.check_previous) ? $in.check_previous : $exists($in.week) %}",
         "emit": "{% $exists($in.emit) ? $in.emit : false %}",
-        "app_id": "{% $exists($in.app_id) ? $in.app_id : '00ga4hfa252ojr09' %}",
+        "app_id": "{% $exists($in.app_id) ? $in.app_id : (($exists($in.dataset) and $contains($in.dataset, /-demo$/)) ? '00ga5en3sapjku09' : '00ga4hfa252ojr09') %}",
         "code": "{% $exists($in.code_prefix) ? $in.code_prefix : 'jobs' %}",
         "marker_key": "{% 'progress/prepare/' & $in.dataset & '/' & ($exists($in.week) ? $in.week : 'full') & '.json' %}",
         "steps": [],
@@ -33,10 +33,10 @@
         "prev": null,
         "checked": false,
         "v2_profile": "{% $exists($in.v2_profile) ? $in.v2_profile = true : false %}",
-        "convert": "{% $exists($in.convert) ? $in.convert : false %}",
         "is_saml": "{% $exists($in.dataset) ? $substring($in.dataset, 0, 5) = 'SAML-' : false %}",
         "feature_version": "{% $exists($in.feature_version) ? $in.feature_version : '2026-11-09.3' %}",
-        "normalised": false
+        "normalised": false,
+        "weekly_only": "{% $exists($in.dataset) ? ($substring($in.dataset, 0, 5) = 'SAML-' or $substring($in.dataset, 0, 8) = 'HI-Large') : false %}"
       },
       "Next": "Plan",
       "Comment": "Bump the default feature_version whenever any feature builder changes; callers may explicitly request a version."
@@ -44,7 +44,7 @@
     "Plan": {
       "Type": "Pass",
       "Assign": {
-        "problems": "{% [ ($type($feature_version) = 'string' ? $length($trim($feature_version)) = 0 : true) ? 'feature_version must be a non-empty string', $not(($dataset != null)) ? 'dataset is missing', (($week != null) and $fromMillis($toMillis($week & 'T00:00:00Z'), '[F1]') != '1') ? 'week must be a Monday: ' & $week, ($is_saml and $not($dataset in ['SAML-R', 'SAML-C'])) ? 'SAML datasets are SAML-R (ramp) or SAML-C (control): ' & $dataset, ($is_saml and $week != null) ? 'SAML datasets are prepared whole (no week)' ] %}",
+        "problems": "{% [ ($type($feature_version) = 'string' ? $length($trim($feature_version)) = 0 : true) ? 'feature_version must be a non-empty string', $not(($dataset != null)) ? 'dataset is missing', (($week != null) and $fromMillis($toMillis($week & 'T00:00:00Z'), '[F1]') != '1') ? 'week must be a Monday: ' & $week, ($is_saml and $not($contains($dataset, /^SAML-[RC](-|$)/))) ? 'SAML datasets are SAML-R (ramp) or SAML-C (control), or a weekly replay of one (e.g. SAML-R-demo): ' & $dataset, ($weekly_only and $week = null) ? 'HI-Large and SAML datasets arrive one week at a time: give a week (only the training sets HI-Small / HI-Medium are prepared whole): ' & $dataset ] %}",
         "spark": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=16g --conf spark.driver.memoryOverhead=4g --conf spark.driver.maxResultSize=2g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=4g --conf spark.emr-serverless.executor.disk=100g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.sql.autoBroadcastJoinThreshold=-1' %}"
       },
       "Next": "ValidInput?"
@@ -171,7 +171,7 @@
     },
     "ReadPrevious": {
       "Type": "Task",
-      "Comment": "A week's features read 21 days back, so the previous week must be cleaned first.",
+      "Comment": "A week's features read 21 days back, so the previous week must be cleaned first (unless it was never delivered).",
       "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
       "Arguments": {
         "Bucket": "is459-g1t4-aml",
@@ -211,12 +211,12 @@
           "Next": "LogStart"
         }
       ],
-      "Default": "PreviousMissing"
+      "Default": "PreviousDelivered"
     },
     "PreviousMissing": {
       "Type": "Fail",
       "Error": "PreviousWeekNotPrepared",
-      "Cause": "{% 'week ' & $prev_week & ' of ' & $dataset & ' is not cleaned yet; prepare it first (or pass check_previous: false for the first week of a dataset)' %}"
+      "Cause": "{% 'week ' & $prev_week & ' of ' & $dataset & ' was delivered but is not cleaned yet; replay or prepare it first (or pass check_previous: false)' %}"
     },
     "LogStart": {
       "Type": "Task",
@@ -227,7 +227,7 @@
         "ContentType": "application/json",
         "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'feature_version': $done.feature_version, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': false, 'features': false, 'v2_done': false, 'txn_done': false} %}"
       },
-      "Next": "Saml?",
+      "Next": "Clean",
       "Catch": [
         {
           "ErrorEquals": [
@@ -689,108 +689,6 @@
       "Error": "{% $failed_step ? $failed_step : 'PrepareFailed' %}",
       "Cause": "{% $string($error) %}"
     },
-    "Saml?": {
-      "Type": "Choice",
-      "Comment": "SAML-R / SAML-C start from SAML-D, which has its own columns. ConvertSaml (saml_ramp_spark.py) writes them in the IBM layout under raw/, then the normal Clean runs. Converts only when raw/ has no files for the dataset yet, or when convert: true.",
-      "Choices": [
-        {
-          "Condition": "{% $is_saml and $convert %}",
-          "Next": "ConvertSaml"
-        },
-        {
-          "Condition": "{% $is_saml %}",
-          "Next": "HasRawSaml"
-        }
-      ],
-      "Default": "Clean"
-    },
-    "HasRawSaml": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:s3:listObjectsV2",
-      "Arguments": {
-        "Bucket": "is459-g1t4-aml",
-        "Prefix": "{% 'raw/transactions/set=' & $dataset & '/' %}",
-        "MaxKeys": 1
-      },
-      "Assign": {
-        "has_raw": "{% $states.result.KeyCount > 0 %}"
-      },
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "LogFailure",
-          "Assign": {
-            "failed_step": "HasRawSaml",
-            "error": "{% $states.errorOutput %}"
-          }
-        }
-      ],
-      "Next": "ConvertNeeded?"
-    },
-    "ConvertNeeded?": {
-      "Type": "Choice",
-      "Choices": [
-        {
-          "Condition": "{% $has_raw %}",
-          "Next": "Clean"
-        }
-      ],
-      "Default": "ConvertSaml"
-    },
-    "ConvertSaml": {
-      "Type": "Task",
-      "Comment": "SAML-D.csv -> raw/transactions, raw/patterns, raw/accounts for BOTH SAML-R (emerging typologies switched on gradually) and SAML-C (control: never switched on), in the IBM layout. Settings (emerging typologies, doses, dates) are in bq2_common.py.",
-      "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
-      "Arguments": {
-        "ApplicationId": "{% $app_id %}",
-        "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
-        "Name": "aml-convert-saml",
-        "ClientToken": "{% $uuid() %}",
-        "ExecutionTimeoutMinutes": 60,
-        "JobDriver": {
-          "SparkSubmit": {
-            "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/saml_ramp_spark.py' %}",
-            "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=2 --conf spark.driver.memory=8g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=2g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g' %}"
-          }
-        },
-        "ConfigurationOverrides": {
-          "MonitoringConfiguration": {
-            "S3MonitoringConfiguration": {
-              "LogUri": "s3://is459-g1t4-aml/logs/emr_serverless/"
-            }
-          }
-        }
-      },
-      "Retry": [
-        {
-          "ErrorEquals": [
-            "States.TaskFailed",
-            "States.Timeout"
-          ],
-          "IntervalSeconds": 300,
-          "MaxAttempts": 1,
-          "BackoffRate": 2
-        }
-      ],
-      "Assign": {
-        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'ConvertSaml', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
-      },
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "LogFailure",
-          "Assign": {
-            "failed_step": "ConvertSaml",
-            "error": "{% $states.errorOutput %}"
-          }
-        }
-      ],
-      "Next": "Clean"
-    },
     "ReconcileProgress": {
       "Type": "Pass",
       "Comment": "Preserve cleaning and same-version checkpoints. A full force resets all progress; a requested feature rebuild or version mismatch resets every dependent feature stage. Clean-only calls preserve the actual feature version.",
@@ -799,6 +697,42 @@
         "done": "{% ( $old := $done ? $done : {}; $reset := $force or ($features and ($force_features or $old.feature_version != $feature_version or $not($exists($old.feature_version)))); $merge([$old, {'cleaned': $not($force) and $old.cleaned = true, 'features': $not($reset) and $old.features = true, 'v2_done': $not($reset) and ($old.v2_done = true or $old.features = true), 'txn_done': $not($reset) and ($old.txn_done = true or $old.features = true), 'feature_version': $features ? $feature_version : ($force ? null : ($exists($old.feature_version) ? $old.feature_version : null))}]) ) %}"
       },
       "Next": "AlreadyDone?"
+    },
+    "PreviousDelivered": {
+      "Type": "Task",
+      "Comment": "The previous week is not cleaned. If it was never delivered (no raw folder), this is the first week of the feed and there is no history to wait for; otherwise it must be prepared first.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:listObjectsV2",
+      "Arguments": {
+        "Bucket": "is459-g1t4-aml",
+        "Prefix": "{% 'raw/transactions/set=' & $dataset & '/week=' & $prev_week & '/' %}",
+        "MaxKeys": 1
+      },
+      "Assign": {
+        "prev_delivered": "{% $states.result.KeyCount > 0 %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed",
+          "Assign": {
+            "failed_step": "PreviousDelivered",
+            "error": "{% $states.errorOutput %}"
+          }
+        }
+      ],
+      "Next": "FirstWeek?"
+    },
+    "FirstWeek?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $not($prev_delivered) %}",
+          "Next": "LogStart"
+        }
+      ],
+      "Default": "PreviousMissing"
     }
   }
 }

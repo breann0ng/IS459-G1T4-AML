@@ -1,5 +1,5 @@
 # BQ2 weekly pipeline: state machine, approval queue, notifications, schedule.
-# The definition is generated: python aws/step-functions/build_bq2_weekly.py (needs the topic ARN and queue URL
+# The definition is generated: python build_bq2_weekly.py (BQ2 team's generator, not in this repo) (needs the topic ARN and queue URL
 # below, so apply the topic and queue first: terraform apply -target=aws_sns_topic.bq2 -target=aws_sqs_queue.bq2_approvals).
 
 variable "bq2_notify_emails" {
@@ -116,14 +116,14 @@ resource "aws_iam_role_policy" "sfn_bq2" {
 resource "aws_sfn_state_machine" "bq2_weekly" {
   name       = "aml_bq2_weekly"
   role_arn   = aws_iam_role.sfn_bq2.arn
-  definition = file("${path.module}/../step-functions/aml_bq2_weekly.asl.json")
+  definition = file("${path.module}/../orchestration/state-machines/aml_bq2_weekly.asl.json")
   logging_configuration {
     log_destination        = "${aws_cloudwatch_log_group.bq2_weekly.arn}:*"
     include_execution_data = true
     level                  = "ERROR"
   }
 
-  # The live definition is deployed by the BQ2 team (aws/step-functions/aml_bq2_weekly.asl.json, via the console
+  # The live definition is deployed by the BQ2 team (aws/orchestration/state-machines/aml_bq2_weekly.asl.json, via the console
   # or CLI) when they switch it over; an infrastructure apply must never swap it under a running pipeline.
   lifecycle {
     ignore_changes = [definition]

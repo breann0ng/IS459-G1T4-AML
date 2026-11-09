@@ -196,7 +196,7 @@ def load_ibm():
 # ------------------------------------------------------------------ BQ1 weekly results (aml_bq1_score -> analytics.live_*)
 # Same keys as data/dashboard_data_live_HI-Large-live.json, so app_bq1.py and home.py show every finished week
 # without a new export: each week is pooled from the tables the weekly pipeline writes (Athena tables in
-# aws/sql/ddl/create_bq1_live_tables.sql). Scheme timings (speed) still come from the one-off run's file.
+# aws/athena/ddl/create_bq1_live_tables.sql). Scheme timings (speed) still come from the one-off run's file.
 BQ1_LIVE_DS = "HI-Large-live"
 NAMED = ("cycle", "fan_in", "fan_out", "gather_scatter", "layering", "random", "scatter_gather")
 _bq1_cache = {}

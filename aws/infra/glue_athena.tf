@@ -1,4 +1,4 @@
-# Glue Data Catalog: one database per lake layer (replaces aws/sql/ddl/create_databases.sql).
+# Glue Data Catalog: one database per lake layer (replaces the old create_databases.sql).
 resource "aws_glue_catalog_database" "layer" {
   for_each     = toset(["curated", "features", "analytics"])
   name         = each.key

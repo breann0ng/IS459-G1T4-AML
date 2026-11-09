@@ -1,9 +1,0 @@
-[{
-  "Id": "terraform-vrBlZnaxEfPMfObqIC1tVV0PMW",
-  "Arn": "arn:aws:sns:us-east-1:390402569482:aml-bq1-weekly-alerts",
-  "InputTransformer": {
-    "InputPathsMap": {"arn": "$.detail.executionArn", "machine": "$.detail.stateMachineArn",
-                      "name": "$.detail.name", "status": "$.detail.status"},
-    "InputTemplate": "\"AML pipeline run <status>: <name> (<machine>). Run logs: aml_prepare -> s3://is459-g1t4-aml/progress/prepare/{dataset}/{week}.json, aml_bq1_score -> s3://is459-g1t4-aml/progress/bq1/score/<name>.json. Console (input, error, step): https://us-east-1.console.aws.amazon.com/states/home?region=us-east-1#/v2/executions/details/<arn>\""
-  }
-}]

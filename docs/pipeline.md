@@ -1,14 +1,14 @@
 # The AWS pipeline: which data goes through which state machine
 
 Account 390402569482, region us-east-1, bucket `is459-g1t4-aml`. Every step is one EMR Serverless
-job. Every state machine is in [`aws/step-functions/`](../aws/step-functions/) exactly as it runs.
+job. Every state machine and EventBridge rule is in [`aws/orchestration/`](../aws/orchestration/) exactly as it runs.
 
 ```
                        ┌──────────────────────────── aml_prepare (shared) ────────────────────────────┐
  HI-Small  (whole) ───►│                                                                              │──► aml_bq1_train
- HI-Medium (whole) ───►│  [ConvertSaml: SAML only] → Clean → ParsePatterns → FeaturesV2 → FeaturesTxn  │      (detector, namer,
- HI-Large-live (week)─►│                                                      → FeaturesV3             │       gate, champion)
- SAML-R / SAML-C ─────►│  progress marker per dataset/week: a second caller returns at once           │──► aml_bq1_score
+ HI-Medium (whole) ───►│  Clean → ParsePatterns → FeaturesV2 → FeaturesTxn → FeaturesV3                │      (detector, namer,
+ HI-Large-live (week)─►│                                                                              │       gate, champion)
+ SAML-R-* (week) ─────►│  progress marker per dataset/week: a second caller returns at once           │──► aml_bq1_score
                        └──────────────────────────────────────────────────────────────────────────────┘      (HI-Large weeks)
                                                     │
                                                     └──► aml_bq2_weekly (SAML-R)
@@ -19,20 +19,32 @@ job. Every state machine is in [`aws/step-functions/`](../aws/step-functions/) e
 |---|---|---|---|
 | HI-Small, HI-Medium | `aml_prepare` (whole file) | `aml_bq1_train` | BQ1: train the detector + namer; gate on validation days; promote the champion |
 | HI-Large-live (weekly files) | `aml_prepare` (one week) | `aml_bq1_score` | BQ1: score each new week with the champion, name the patterns, check analyst load |
-| SAML-R (ramp) / SAML-C (control) | `aml_prepare` (whole; SAML-D converted first) | `aml_bq2_weekly` | BQ2: do tactics change, does detection drop (R1–R3), does retraining recover it |
+| SAML-R (ramp) / SAML-C (control), weekly replays (e.g. SAML-R-demo) | `aml_prepare` (one week) | `aml_bq2_weekly` | BQ2: do tactics change, does detection drop (R1–R3), does retraining recover it |
 | HI-Large-NT (fan-in / fan-out hidden before 2022-10-03) | `aml_bq2_weekly_ibm` (own features) | its v0 model scores the weeks, v1 is the challenger | BQ2 on real IBM data: is a "new" tactic caught |
 
-SAML-D has its own columns, so `aml_prepare` first converts it to the IBM layout
-(`saml_ramp_spark.py`, writes both SAML-R and SAML-C). From Clean onwards every dataset takes the
-same steps and the same code.
+Like a real bank feed, only the training sets (HI-Small, HI-Medium) are prepared whole. HI-Large and
+SAML arrive one week at a time: `aml_prepare` refuses them without a week.
+
+One-off setup before a weekly feed starts (the "bank's archive"):
+1. HI-Large: `load_kaggle.sh` puts the Kaggle file in `raw/transactions/set=HI-Large/`.
+   SAML: `saml_ramp_spark.py` converts SAML-D to the IBM layout (writes both SAML-R and SAML-C,
+   with their answer keys and accounts files).
+2. `split_weeks_spark.py <SRC> <OUT>` cuts it into `staging/transactions/set=<OUT>/week=<Monday>/`
+   and copies the answer key and accounts file to `raw/patterns|accounts/set=<OUT>/`.
+3. `local/simulate/replay_week.py <OUT> <Monday>` plays the bank: it copies one week into
+   `raw/transactions/set=<OUT>/week=<Monday>/` and writes `_SUCCESS` last, which starts `aml_prepare`.
+
+From Clean onwards every dataset takes the same steps and the same code.
 
 ## aml_prepare
 
-Input `{"dataset": "HI-Large-live", "week": "2022-09-12"}` (one weekly file) or
-`{"dataset": "HI-Medium"}` / `{"dataset": "SAML-R"}` (whole dataset). Options: `features` (default
-true; false = clean only), `force`, `force_features`, `convert` (SAML: redo the conversion),
-`check_previous` (week mode: the previous week must be cleaned, for the 21-day look-back), `emit`
-(publish `DataPrepared` when done), `app_id`, `code_prefix`, `feature_version`.
+Input `{"dataset": "HI-Large-live", "week": "2022-09-12"}` / `{"dataset": "SAML-R-demo", "week":
+"2023-01-30"}` (one weekly file) or `{"dataset": "HI-Medium"}` (whole training set). Options:
+`features` (default true; false = clean only), `force`, `force_features`, `check_previous` (week mode:
+the previous week must be cleaned, for the 21-day look-back; a previous week that was never delivered
+means this is the first week of the feed, which goes ahead), `emit` (publish `DataPrepared` when
+done; S3-started runs always do), `app_id` (default aml-bq1; `*-demo` datasets default to
+aml-bq1-dev, so demos never queue behind real runs), `code_prefix`, `feature_version`.
 
 Progress marker: `s3://is459-g1t4-aml/progress/prepare/<dataset>/<week|full>.json`. A finished
 dataset or week returns at once when its feature version matches the requested version.
@@ -67,10 +79,8 @@ Use that same override when resuming the run. For normal pipeline releases, bump
 instead so nested BQ1/BQ2 callers request the same version. Output table names remain unchanged;
 different versions are not stored as separate feature tables.
 
-Local workflow regression checks evaluate the actual JSONata expressions with simulated service
-responses (no AWS calls): install `pytest` and `jsonata-python==0.7.1`, then run
-`python -m pytest tests/test_aml_prepare.py`. Validate the definition with AWS before deployment;
-local checks do not replace an EMR integration run.
+Validate the definition with AWS (`aws stepfunctions validate-state-machine-definition`) before
+deployment; that does not replace an EMR integration run.
 
 Sizing (tested on HI-Medium, 8 Nov 2026):
 
@@ -136,8 +146,8 @@ to check, so it has not been done.
 AML_BUCKET=is459-g1t4-aml bash aws/deploy/deploy.sh        # code: every aws/jobs/*/* -> s3://.../jobs/ + jobs.zip
 aws stepfunctions update-state-machine \
   --state-machine-arn arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare \
-  --definition file://aws/step-functions/aml_prepare.asl.json   # same for the other machines
+  --definition file://aws/orchestration/state-machines/aml_prepare.asl.json   # same for the other machines
 ```
 
-See [`aws/step-functions/README.md`](../aws/step-functions/README.md) for what is live, what is
+See [`aws/orchestration/README.md`](../aws/orchestration/README.md) for what is live, what is
 not deployed yet, and the IAM and EventBridge changes that go with it.
