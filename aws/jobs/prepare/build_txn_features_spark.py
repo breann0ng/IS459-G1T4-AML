@@ -31,6 +31,7 @@ Columns that are NOT features: dataset, week, txn_id, date, s_id, r_id, label, p
 import os
 import sys
 
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 
@@ -63,6 +64,12 @@ CURATED = f"{ROOT}/curated"
 META = ["dataset", "week", "acct_bank", "acct", "date", "label", "first_laundering_ts",
         "pattern_label"]
 FORMATS = ["ACH", "Bitcoin", "Cash", "Cheque", "Credit Card", "Reinvestment", "Wire"]
+DISK = StorageLevel.MEMORY_AND_DISK
+# Receiving amount/currency are not used by the payment features. Avoid carrying them
+# through all three history-window sorts or caching them during chunk partition discovery.
+TX_COLS = ["txn_id", "txn_time", "txn_date", "from_bank", "from_account", "to_bank", "to_account",
+           "amount_paid", "payment_currency", "payment_format", "is_cross_currency",
+           "is_self_transfer", "dataset", "week"]
 
 spark = SparkSession.builder.appName(f"BuildTxnFeatures-{DATASET}").getOrCreate()
 
@@ -81,7 +88,17 @@ spark.conf.set("spark.sql.ansi.enabled", "false")
 
 
 def main():
-    all_tx = spark.read.parquet(f"{CURATED}/transactions").filter(F.col("dataset") == DATASET)
+    caches = []
+    try:
+        build_outputs(caches)
+    finally:
+        for cached in reversed(caches):
+            cached.unpersist()
+
+
+def build_outputs(caches):
+    all_tx = (spark.read.parquet(f"{CURATED}/transactions")
+              .filter(F.col("dataset") == DATASET).select(*TX_COLS))
     med_base = all_tx       # median per currency: a chunk uses only payments up to its last day
     if CHUNK_TO:
         med_base = med_base.filter(F.col("txn_date") <= F.lit(CHUNK_TO).cast("date"))
@@ -104,54 +121,21 @@ def main():
                .withColumn("_n", F.row_number().over(first_scheme)).filter("_n = 1")
                .select("txn_id", F.col("pattern_type").alias("scheme_pattern")))
 
-    ts = F.col("txn_time").cast("long")
-    pair = Window.partitionBy("from_bank", "from_account", "to_bank", "to_account")
-    s_day = Window.partitionBy("from_bank", "from_account", "txn_date").orderBy("txn_time", "txn_id")
-    r_day = Window.partitionBy("to_bank", "to_account", "txn_date").orderBy("txn_time", "txn_id")
-    amt = F.col("amount_paid").cast("double")
-    t = (tx.join(F.broadcast(med), "payment_currency", "left")
-           .withColumn("t_amt_rel", amt / F.col("med_paid"))
-           .withColumn("t_log_amt", F.log1p(amt))
-           .withColumn("t_hour", F.hour("txn_time").cast("double"))
-           .withColumn("t_round", ((amt % 100) == 0).cast("double"))
-           .withColumn("t_cross_ccy", F.col("is_cross_currency").cast("double"))
-           .withColumn("t_self", F.col("is_self_transfer").cast("double"))
-           .withColumn("t_same_bank", (F.col("from_bank") == F.col("to_bank")).cast("double"))
-           .withColumn("t_pair_n_7d", F.count(F.lit(1)).over(
-               pair.orderBy(ts).rangeBetween(-PAIR_DAYS * 86400, -1)).cast("double"))
-           .withColumn("t_pair_age_d", ((ts - F.min(ts).over(pair)) / 86400.0))
-           .withColumn("t_s_seq", F.row_number().over(s_day).cast("double"))
-           .withColumn("t_r_seq", F.row_number().over(r_day).cast("double")))
-    for f in FORMATS:
-        t = t.withColumn("t_fmt_" + f.lower().replace(" ", "_"),
-                         (F.col("payment_format") == f).cast("double"))
-    if CHUNK_FROM:
-        t = t.filter(F.col("txn_date") >= F.lit(CHUNK_FROM).cast("date"))
+    t = payment_features(tx, med)
 
     feats = spark.read.parquet(f"{CURATED}/{FEATURES_TABLE}").filter(F.col("dataset") == DATASET)
     if CHUNK_FROM:
         feats = feats.filter((F.col("date") >= F.lit(CHUNK_FROM).cast("date"))
                              & (F.col("date") <= F.lit(CHUNK_TO).cast("date")))
     fcols = [c for c in feats.columns if c not in META]
-    side = lambda p, b, a: feats.select(
-        F.col("acct_bank").alias(b), F.col("acct").alias(a), F.col("date").alias("txn_date"),
-        *[F.col(c).cast("float").alias(p + c) for c in fcols])
-
-    t = (t.join(side("s_", "from_bank", "from_account"), ["from_bank", "from_account", "txn_date"], "left")
-          .join(side("r_", "to_bank", "to_account"), ["to_bank", "to_account", "txn_date"], "left")
-          .join(labels, "txn_id", "left")
-          .join(schemes, "txn_id", "left")
-          .withColumn("label", F.coalesce("label", F.lit(0)))
-          .withColumn("pattern_label", F.when(F.col("label") == 0, "none")
-                                        .otherwise(F.coalesce("scheme_pattern", F.lit("unclassified"))))
-          .withColumn("s_id", F.xxhash64(F.col("from_bank").cast("string"), "from_account"))
-          .withColumn("r_id", F.xxhash64(F.col("to_bank").cast("string"), "to_account"))
-          .withColumnRenamed("txn_date", "date"))
-    tcols = [c for c in t.columns if c.startswith("t_")]
-    out = t.select("dataset", "week", "txn_id", "date", "s_id", "r_id", "label", "pattern_label",
-                   *[F.col(c).cast("float").alias(c) for c in tcols],
-                   *[F.col(c) for c in t.columns if c.startswith(("s_", "r_")) and c not in ("s_id", "r_id")])
-    out = out.fillna(0.0).persist()
+    # One narrow read and one set of float conversions for both account joins. Not cached: on a
+    # benchmark (HI-Medium, 8-9 Nov 2026) caching this and the chunk's payments made the job slower;
+    # without both caches it ran 263 s vs 328 s for the previous version (whole dataset).
+    feats = feats.select("acct_bank", "acct", "date",
+                          *[F.col(c).cast("float").alias(c) for c in fcols])
+    out, tcols = attach_features(t, labels, schemes, feats, fcols)
+    out = out.persist(DISK)
+    caches.append(out)
 
     sample = out.filter((F.col("label") == 1) | (F.rand(RANDOM_SEED) < NEG_SAMPLE_RATE))
     # rebalance, not repartition: by week alone one task wrote each week while the other cores
@@ -163,10 +147,67 @@ def main():
     rebalance(full, "dataset", "week").write.mode("overwrite") \
         .partitionBy("dataset", "week").parquet(f"{CURATED}/txn_features")
 
-    n = out.count()
-    n_pos = out.filter("label = 1").count()
-    print(f"[txn] {DATASET}: payments={n} laundering={n_pos} features={len(tcols) + 2 * len(fcols)} "
+    totals = out.agg(F.count(F.lit(1)).alias("n"),
+        F.coalesce(F.sum((F.col("label") == 1).cast("long")), F.lit(0)).alias("n_pos")).first()
+    print(f"[txn] {DATASET}: payments={totals['n']} laundering={totals['n_pos']} features={len(tcols) + 2 * len(fcols)} "
           f"(own {len(tcols)} + sender/receiver {len(fcols)} each); full rows from {full_from or 'start'}")
+
+
+def payment_features(tx, med):
+    """Compute history windows before widening each row with scalar payment features."""
+    ts = F.col("txn_time").cast("long")
+    pair = Window.partitionBy("from_bank", "from_account", "to_bank", "to_account")
+    s_day = Window.partitionBy("from_bank", "from_account", "txn_date").orderBy("txn_time", "txn_id")
+    r_day = Window.partitionBy("to_bank", "to_account", "txn_date").orderBy("txn_time", "txn_id")
+    amt = F.col("amount_paid").cast("double")
+    t = (tx.withColumn("t_pair_n_7d", F.count(F.lit(1)).over(
+               pair.orderBy(ts).rangeBetween(-PAIR_DAYS * 86400, -1)).cast("double"))
+           .withColumn("t_pair_age_d", ((ts - F.min(ts).over(pair)) / 86400.0))
+           .withColumn("t_s_seq", F.row_number().over(s_day).cast("double"))
+           .withColumn("t_r_seq", F.row_number().over(r_day).cast("double")))
+    for f in FORMATS:
+        t = t.withColumn("t_fmt_" + f.lower().replace(" ", "_"),
+                         (F.col("payment_format") == f).cast("double"))
+    if CHUNK_FROM:
+        t = t.filter(F.col("txn_date") >= F.lit(CHUNK_FROM).cast("date"))
+
+    t = (t.join(F.broadcast(med), "payment_currency", "left")
+           .withColumn("t_amt_rel", amt / F.col("med_paid"))
+           .withColumn("t_log_amt", F.log1p(amt))
+           .withColumn("t_hour", F.hour("txn_time").cast("double"))
+           .withColumn("t_round", ((amt % 100) == 0).cast("double"))
+           .withColumn("t_cross_ccy", F.col("is_cross_currency").cast("double"))
+           .withColumn("t_self", F.col("is_self_transfer").cast("double"))
+           .withColumn("t_same_bank", (F.col("from_bank") == F.col("to_bank")).cast("double")))
+    # Preserve the established feature order even though computation now happens later.
+    scalar_cols = ["t_amt_rel", "t_log_amt", "t_hour", "t_round", "t_cross_ccy", "t_self", "t_same_bank"]
+    history_cols = ["t_pair_n_7d", "t_pair_age_d", "t_s_seq", "t_r_seq"]
+    format_cols = ["t_fmt_" + f.lower().replace(" ", "_") for f in FORMATS]
+    return t.select("dataset", "week", "txn_id", "txn_date", "from_bank", "from_account",
+                    "to_bank", "to_account", *scalar_cols, *history_cols, *format_cols)
+
+
+def attach_features(t, labels, schemes, feats, fcols):
+    """Join labels/schemes while rows are narrow, then attach the wide account-day features."""
+    t = (t.join(labels, "txn_id", "left").join(schemes, "txn_id", "left")
+          .withColumn("label", F.coalesce("label", F.lit(0)))
+          .withColumn("pattern_label", F.when(F.col("label") == 0, "none")
+                                        .otherwise(F.coalesce("scheme_pattern", F.lit("unclassified"))))
+          .drop("scheme_pattern"))
+    side = lambda p, b, a: feats.select(
+        F.col("acct_bank").alias(b), F.col("acct").alias(a), F.col("date").alias("txn_date"),
+        *[F.col(c).cast("float").alias(p + c) for c in fcols])
+
+    t = (t.join(side("s_", "from_bank", "from_account"), ["from_bank", "from_account", "txn_date"], "left")
+          .join(side("r_", "to_bank", "to_account"), ["to_bank", "to_account", "txn_date"], "left")
+          .withColumn("s_id", F.xxhash64(F.col("from_bank").cast("string"), "from_account"))
+          .withColumn("r_id", F.xxhash64(F.col("to_bank").cast("string"), "to_account"))
+          .withColumnRenamed("txn_date", "date"))
+    tcols = [c for c in t.columns if c.startswith("t_")]
+    out = t.select("dataset", "week", "txn_id", "date", "s_id", "r_id", "label", "pattern_label",
+                   *[F.col(c).cast("float").alias(c) for c in tcols],
+                   *[F.col(c) for c in t.columns if c.startswith(("s_", "r_")) and c not in ("s_id", "r_id")])
+    return out.fillna(0.0), tcols
 
 
 if __name__ == "__main__":
