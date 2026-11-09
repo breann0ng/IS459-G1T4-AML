@@ -207,7 +207,7 @@
               "Type": "Task",
               "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
               "Parameters": {
-                "ApplicationId": "00ga27nqsrmqmp09",
+                "ApplicationId": "00ga5rjkauu2r909",
                 "ClientToken.$": "States.UUID()",
                 "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
                 "Name": "bq2-part1-SAML-R",
@@ -258,7 +258,7 @@
                   "week.$": "$.week_start",
                   "features": true,
                   "AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID.$": "$$.Execution.Id",
-                  "app_id": "00ga27nqsrmqmp09"
+                  "app_id": "00ga5rjkauu2r909"
                 }
               },
               "Retry": [
@@ -278,7 +278,7 @@
               "Type": "Task",
               "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
               "Parameters": {
-                "ApplicationId": "00ga27nqsrmqmp09",
+                "ApplicationId": "00ga5rjkauu2r909",
                 "ClientToken.$": "States.UUID()",
                 "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
                 "Name": "bq2-score",
@@ -305,7 +305,7 @@
               "Type": "Task",
               "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
               "Parameters": {
-                "ApplicationId": "00ga27nqsrmqmp09",
+                "ApplicationId": "00ga5rjkauu2r909",
                 "ClientToken.$": "States.UUID()",
                 "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
                 "Name": "bq2-eval",
@@ -398,7 +398,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
       "Parameters": {
-        "ApplicationId": "00ga27nqsrmqmp09",
+        "ApplicationId": "00ga5rjkauu2r909",
         "ClientToken.$": "States.UUID()",
         "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
         "Name": "bq2-train",
@@ -425,7 +425,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
       "Parameters": {
-        "ApplicationId": "00ga27nqsrmqmp09",
+        "ApplicationId": "00ga5rjkauu2r909",
         "ClientToken.$": "States.UUID()",
         "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
         "Name": "bq2-score-challenger",
@@ -452,7 +452,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
       "Parameters": {
-        "ApplicationId": "00ga27nqsrmqmp09",
+        "ApplicationId": "00ga5rjkauu2r909",
         "ClientToken.$": "States.UUID()",
         "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
         "Name": "bq2-eval-challenger",
@@ -517,7 +517,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
       "Parameters": {
-        "ApplicationId": "00ga27nqsrmqmp09",
+        "ApplicationId": "00ga5rjkauu2r909",
         "ClientToken.$": "States.UUID()",
         "ExecutionRoleArn": "arn:aws:iam::390402569482:role/aml-emr-serverless-job",
         "Name": "bq2-deploy",

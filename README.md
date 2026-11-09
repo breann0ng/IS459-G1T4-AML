@@ -12,7 +12,7 @@ aws/                      ★ DEPLOYED TO AWS
   jobs/                     code -> s3://<bucket>/jobs/ (one flat folder + jobs.zip), runs on EMR Serverless
     setup/                    one-off, before a weekly feed starts: load_kaggle.sh · saml_ramp_spark.py
                               (SAML-D -> IBM layout) · split_weeks_spark.py (whole file -> weekly files in staging/)
-    prepare/                  the aml_prepare steps: clean · parse_patterns · 3 feature builders
+    prepare/                  the aml_prepare steps: clean · parse_patterns_spark · 3 feature builders
     bq1/                      train_txn · group_stage2 · final_train · score_final_spark · final_group_namer
                               scheme_stage2 · shape_rules · bq1_checks
     bq2/                      bq2_common · part1 tactics · part2 train/score/eval · deploy · HI-Large scoring
