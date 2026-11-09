@@ -42,8 +42,9 @@ ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never w
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
 WEEK = sys.argv[2] if len(sys.argv) > 2 else None   # optional: Monday of the one weekly file to clean
-# Replays use their Kaggle set's settings: HI-Large-live, HI-Medium-joey -> HI-Large, HI-Medium
-_base = re.match(r"HI-(Small|Medium|Large)", DATASET)
+# Replays use their source set's settings: HI-Large-live, HI-Large-demo -> HI-Large;
+# SAML-R-demo -> SAML-R (weekly replay of the converted SAML-D ramp)
+_base = re.match(r"HI-(Small|Medium|Large)|SAML-[RC]", DATASET)
 BASE = _base.group(0) if _base else DATASET
 
 # First day of each dataset (from the Kaggle files): weekly runs number weeks from its Monday,
@@ -52,6 +53,8 @@ FIRST_DAY = {
     "HI-Small": "2022-09-01",
     "HI-Medium": "2022-09-01",
     "HI-Large": "2022-08-01",
+    "SAML-R": "2022-10-07",     # SAML-D's first day: same week numbers as the whole SAML-R clean
+    "SAML-C": "2022-10-07",
 }
 
 # Daily mode (Step Functions aml-daily): clean the week of AML_RUN_DATE so far, from the day folders
