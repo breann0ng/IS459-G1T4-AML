@@ -17,8 +17,11 @@ reads with s3:getObject (Step Functions cannot read Parquet itself).
     python3 bq1_checks.py week <dataset> <week_monday>       [--capacity 2500] [--min-precision 0.70]
         After scoring a week. Is the alert queue still manageable for the analysts?
         Reads   analytics/live_results (dataset, run_date=<week_monday>), account-day level
+        Reads   analytics/live_daily   (levels account_day_raised / account_day_used: before / after the cap)
         Writes  progress/bq1/<dataset>/<week_monday>/check.json
-                {"alerts_per_day", "precision", "recall", "over_capacity", "low_precision", "notify"}
+                {"alerts_per_day", "precision", "recall", "over_capacity", "capped_days", "low_precision", "notify"}
+        over_capacity = on some day the model raised more alerts than the capacity, so the scoring step held
+        back its lowest-scoring ones (capped_days lists them).
         Precision / recall use the dataset's labels. In a real bank labels arrive weeks later
         (investigations), so these would be graded with a lag; alerts_per_day needs no labels.
 
@@ -98,9 +101,13 @@ def gate(a):
 
 
 def used_row(t):
-    """The alerts the analysts actually get: with alert expansion on, the expanded row; else the threshold."""
-    xp = t[t["cutoff"].astype(str).str.startswith("expand")]
-    return (xp if not xp.empty else t[t["cutoff"] == "frozen_threshold"]).iloc[0]
+    """The alerts the analysts actually get, the last rule applied by score_final_spark.py:
+    daily capacity (capacity<K>) > alert expansion (expand<LOW>) > the frozen threshold."""
+    for prefix in ("capacity", "expand"):
+        x = t[t["cutoff"].astype(str).str.startswith(prefix)]
+        if not x.empty:
+            return x.iloc[0]
+    return t[t["cutoff"] == "frozen_threshold"].iloc[0]
 
 
 def live_table(name, dataset, weeks):
@@ -119,7 +126,14 @@ def week(a):
            "precision": float(row["precision"]), "recall": float(row["recall"]),
            "capacity_per_day": a.capacity, "min_precision": a.min_precision,
            "model_run": os.environ.get("AML_FINAL_RUN"), "checked_at": T.RUN_AT}
-    out["over_capacity"] = out["alerts_per_day"] > a.capacity
+    daily = live_table("live_daily", a.dataset, [a.week])
+    raised = daily[daily["level"] == "account_day_raised"]
+    if raised.empty:                                    # weeks scored before the capacity step
+        out["capped_days"] = []
+        out["over_capacity"] = out["alerts_per_day"] > a.capacity
+    else:
+        out["capped_days"] = sorted(str(d)[:10] for d in raised.loc[raised["alerts"] > a.capacity, "date"])
+        out["over_capacity"] = bool(out["capped_days"])
     out["low_precision"] = out["precision"] < a.min_precision
     out["notify"] = out["over_capacity"] or out["low_precision"]
     put_json(f"{T.ROOT}/progress/bq1/{a.dataset}/{a.week}/check.json", out)

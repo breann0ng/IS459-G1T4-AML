@@ -199,3 +199,52 @@ resource "aws_iam_user_policy" "bq2_approver" {
   user   = aws_iam_user.bq2_approver.name
   policy = local.dashboard_policy
 }
+
+# ---------------------------------------------------------------- BQ2 SAML-D's own EMR Serverless app
+# Applied on 2026-11-09 from a local file that was never pushed; written back here from the shared state so
+# applying main keeps it. SAML-D's weekly jobs run here instead of the shared aml-jobs app (00ga27nqsrmqmp09).
+resource "aws_emrserverless_application" "bq2_saml" {
+  name          = "aml-bq2-saml"
+  release_label = var.emr_release_label
+  type          = "spark"
+  architecture  = "X86_64"
+
+  auto_start_configuration { enabled = true }
+  auto_stop_configuration {
+    enabled              = true
+    idle_timeout_minutes = 5
+  }
+  maximum_capacity {
+    cpu    = "32 vCPU"
+    memory = "128 GB"
+    disk   = "400000 GB"
+  }
+  scheduler_configuration {
+    max_concurrent_runs   = 3
+    queue_timeout_minutes = 60
+  }
+  runtime_configuration {
+    classification = "spark-defaults"
+    properties = {
+      "spark.hadoop.hive.metastore.client.factory.class" = "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+    }
+  }
+  monitoring_configuration {
+    managed_persistence_monitoring_configuration { enabled = true }
+  }
+  job_level_cost_allocation_configuration { enabled = false }
+}
+
+resource "aws_iam_role_policy" "sfn_bq2_saml_app" {
+  name = "aml-sfn-bq2-saml-app"
+  role = aws_iam_role.sfn_bq2.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "RunJobsOnDedicatedApp"
+      Effect   = "Allow"
+      Action   = ["emr-serverless:StartJobRun", "emr-serverless:GetJobRun", "emr-serverless:CancelJobRun"]
+      Resource = ["${aws_emrserverless_application.bq2_saml.arn}/jobruns/*", aws_emrserverless_application.bq2_saml.arn]
+    }]
+  })
+}

@@ -13,7 +13,7 @@
     },
     "Setup": {
       "Type": "Pass",
-      "Comment": "capacity = alerts/day the analyst team can review (a business number: change it here).",
+      "Comment": "capacity = alerts/day the analyst team can review (a business number: change it here). The Score step keeps at most this many alerts a day (highest scores first); WeekCheck reports the days it had to cap.",
       "Assign": {
         "parallel": "{% $exists($in.parallel) ? $in.parallel : 3 %}",
         "force": "{% $exists($in.force) ? $in.force : false %}",
@@ -229,7 +229,7 @@
           },
           "Score": {
             "Type": "Task",
-            "Comment": "Stage 1: the champion model gives every payment a probability; alerts above the frozen threshold (+ alert expansion) -> analytics/live_* (run_date = the Monday).",
+            "Comment": "Stage 1: the champion model gives every payment a probability; alerts above the frozen threshold (+ alert expansion), then at most $capacity a day, highest scores first (AML_CAPACITY) -> analytics/live_* (run_date = the Monday).",
             "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
             "Arguments": {
               "ApplicationId": "{% $app_id %}",
@@ -241,7 +241,7 @@
                 "SparkSubmit": {
                   "EntryPoint": "{% 's3://is459-g1t4-aml/' & $code & '/score_final_spark.py' %}",
                   "EntryPointArguments": "{% [$dataset, $states.input.week, $states.input.week_end] %}",
-                  "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=20g --conf spark.driver.memoryOverhead=2g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g --conf spark.emr-serverless.driver.disk=50g' & ' --conf spark.emr-serverless.driverEnv.AML_RUN_DATE=' & $states.input.week & ' --conf spark.executorEnv.AML_RUN_DATE=' & $states.input.week & ' --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=' & $champion_run & ' --conf spark.executorEnv.AML_FINAL_RUN=' & $champion_run %}"
+                  "SparkSubmitParameters": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=20g --conf spark.driver.memoryOverhead=2g --conf spark.driver.maxResultSize=2g --conf spark.sql.autoBroadcastJoinThreshold=-1 --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=3g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.emr-serverless.executor.disk=100g --conf spark.emr-serverless.driver.disk=50g' & ' --conf spark.emr-serverless.driverEnv.AML_RUN_DATE=' & $states.input.week & ' --conf spark.executorEnv.AML_RUN_DATE=' & $states.input.week & ' --conf spark.emr-serverless.driverEnv.AML_FINAL_RUN=' & $champion_run & ' --conf spark.executorEnv.AML_FINAL_RUN=' & $champion_run & ' --conf spark.emr-serverless.driverEnv.AML_CAPACITY=' & $string($capacity) %}"
                 }
               },
               "ConfigurationOverrides": {

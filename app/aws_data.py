@@ -209,6 +209,16 @@ def bq1_config():
     return meta.get("validated_run", "txn_v3m_xp")
 
 
+def used_row(rows):
+    """The alerts the analysts get, the last rule the scoring step applied: daily capacity (capacity<K>) >
+    alert expansion (expand<LOW>) > the frozen threshold. Same order as bq1_checks.used_row."""
+    for prefix in ("capacity", "expand"):
+        x = rows[rows["cutoff"].astype(str).str.startswith(prefix)]
+        if not x.empty:
+            return x.iloc[0]
+    return rows[rows["cutoff"] == "frozen_threshold"].iloc[0]
+
+
 def load_bq1_live(dataset=BQ1_LIVE_DS, weeks=None, ttl=600):
     """Cached for ttl seconds (shared by every page and viewer of this server), so a page view costs no query."""
     import copy
@@ -286,8 +296,7 @@ def _bq1_live(ds, weeks=None):
     s1 = pd.DataFrame(s1)
     pos_by_level = s1.groupby("level")["positives"].first().to_dict()
     ad = s1[s1["level"] == "account_day"]
-    used = ad[ad["cutoff"].str.startswith("expand")]
-    used = (used if not used.empty else ad[ad["cutoff"] == "frozen_threshold"]).iloc[0]   # the alerts analysts get
+    used = used_row(ad)                                                       # the alerts analysts get
 
     b = pd.DataFrame(res["budget"])
     if not b.empty:

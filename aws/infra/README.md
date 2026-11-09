@@ -10,10 +10,10 @@
 | `emr.tf` | **Imports** the EMR Serverless app `00ga27nqsrmqmp09` (16 vCPU / 64 GB cap, auto-stop 15 min, 2 concurrent runs, 120 min queue timeout) |
 
 | `orchestration.tf` | BQ1: EMR apps `aml-bq1` / `aml-bq1-test`; S3 -> EventBridge; state machines `aml_prepare`, `aml_bq1_score`, `aml_bq1_train` (definitions from `aws/orchestration/state-machines/`, rule patterns from `aws/orchestration/eventbridge/`) and their roles `aml-sfn-pipeline` / `aml-events-pipeline`; rules `aml-prepare-weekly-file` and `aml-bq1-data-prepared` and their targets; failure emails (`aml-bq1-run-ended` -> SNS `aml-bq1-weekly-alerts`); topic `aml-bq1-alerts`. The CLI-built pieces are adopted with `import` blocks |
-| `bq2_weekly.tf` | BQ2 SAML-D: `aml_bq2_weekly` (definition changes are deployed by the BQ2 team, not by apply), its role, weekly schedule (off), SNS `aml-bq2-alerts`, SQS approval queue, approver user |
+| `bq2_weekly.tf` | BQ2 SAML-D: `aml_bq2_weekly` (definition changes are deployed by the BQ2 team, not by apply), its role, its own EMR app `aml-bq2-saml`, weekly schedule (off), SNS `aml-bq2-alerts`, SQS approval queue, approver user |
 | `dashboard_ec2.tf` + `dashboard_user_data.sh` | Streamlit dashboard EC2 `aml-dashboard` (t4g.micro), its role/instance profile and security group. The user data file is byte-for-byte what the instance runs: changing it replaces the instance |
 
-Not here: `aml_bq2_weekly_ibm` (`bq2_weekly_ibm.tf` on Tasha's branch), `aml_bq2_dryrun`.
+| `bq2_weekly_ibm.tf` | BQ2 IBM HI-Large: `aml_bq2_weekly_ibm` (definition deployed by the BQ2 team, not by apply), its log group and its bq2_ibm/ policies (SFN role, dashboard, approver); adopted with `import` blocks |
 Retired 2026-11-09 and removed from the config (apply deletes them): `aml_bq1_weekly`, `aml-bq1-weekly-file`,
 `aml_bq1_abort`, `aml-bq1-run-aborted`, their roles and log groups.
 
