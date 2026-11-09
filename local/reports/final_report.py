@@ -38,6 +38,42 @@ def prf(tp, alerts, pos):
     return p, r, (2 * p * r / (p + r) if p and r and p + r else np.nan)
 
 
+def join_scheme_slices(sch, weeks):
+    """Weekly runs write one row per scheme per week it has payments in. Join them into one row per scheme and keep
+    the schemes that both start and end inside the scored weeks, so every scheme is timed in full."""
+    if "scheme_start" not in sch:     # weeks scored before the scoring job wrote slices: timings are cut at the week end
+        print("[report] scheme rows have no scheme_start: rescore these weeks for whole-scheme timings")
+        return sch.drop_duplicates("scheme_id")
+    t = sch.copy()
+    for c in ["start_time", "end_time", "first_flag_time", "scheme_start", "scheme_end"]:
+        t[c] = pd.to_datetime(t[c])
+    t["first_alert_day"] = pd.to_datetime(t["first_alert_day"])
+    t = t.sort_values(["scheme_id", "start_time"])
+    # payments from the first flag on: the flagged slice's own count, plus every payment in the slices after it
+    first_flag = t.groupby("scheme_id")["first_flag_time"].transform("min")
+    t["_after"] = np.where(t["first_flag_time"] == first_flag, t["n_from_first_flag"],
+                           np.where(t["start_time"] > first_flag, t["n_payments"], 0))
+    g = t.groupby(["scheme_id", "pattern_type"], as_index=False).agg(
+        n_payments=("n_payments", "sum"), start_time=("start_time", "min"), end_time=("end_time", "max"),
+        n_flagged=("n_flagged", "sum"), first_flag_time=("first_flag_time", "min"),
+        first_alert_day=("first_alert_day", "min"), n_from_first_flag=("_after", "sum"),
+        scheme_start=("scheme_start", "first"), scheme_end=("scheme_end", "first"))
+    lo = pd.Timestamp(weeks[0])
+    hi = pd.Timestamp(weeks[-1]) + pd.Timedelta(days=7)
+    whole = (g["start_time"] == g["scheme_start"]) & (g["end_time"] == g["scheme_end"])
+    keep = whole & (g["scheme_start"] >= lo) & (g["scheme_end"] < hi)
+    print(f"[report] schemes: {keep.sum():,} timed in full; dropped {(g['scheme_start'] < lo).sum():,} that started before "
+          f"the first scored week and {(g['scheme_end'] >= hi).sum():,} still running after the last")
+    g = g[keep].copy()
+    g["caught"] = g["first_flag_time"].notna()
+    g["duration_h"] = (g["end_time"] - g["start_time"]).dt.total_seconds() / 3600
+    g["hours_to_first_flag"] = (g["first_flag_time"] - g["start_time"]).dt.total_seconds() / 3600
+    g["share_from_first_flag"] = g["n_from_first_flag"] / g["n_payments"]
+    g["alert_ready_time"] = g["first_alert_day"] + pd.Timedelta(days=1)
+    g["caught_before_end_eod"] = g["alert_ready_time"] <= g["end_time"]
+    return g
+
+
 def merge_weeks(res, budget, pats, st2, sch, named, daily):
     """One row per week -> one row for all weeks: add the counts, then recompute every rate."""
     weeks = sorted(res["run_date"].astype(str).unique())
@@ -71,7 +107,7 @@ def merge_weeks(res, budget, pats, st2, sch, named, daily):
                   .agg({"true_cases": "sum", "named_as": "sum", "correct": "sum", "precision": "mean", "recall": "mean",
                         "f1": "mean"}).assign(pattern="MACRO (7 patterns)"))
         st2 = pd.concat([g, macro], ignore_index=True).assign(dataset=DATASET, run_at=str(st2["run_at"].max()))
-    sch = sch.drop_duplicates("scheme_id")
+    sch = join_scheme_slices(sch, weeks)
     return out, budget, pats, st2, sch, named, daily.sort_values(["level", "date"]), weeks
 
 
