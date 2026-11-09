@@ -4,7 +4,8 @@
 
 variable "dashboard_cidr" {
   type        = string
-  description = "Who may reach the dashboard on port 8501: 0.0.0.0/0 = public (approvals still need the SSM passcode)"
+  default     = "0.0.0.0/0" # as applied: open, so graders and teammates can reach it; the approval page needs a passcode
+  description = "Who may reach the dashboard on port 8501, e.g. 1.2.3.4/32"
 }
 
 variable "dashboard_instance_type" {
@@ -30,7 +31,7 @@ data "aws_ssm_parameter" "al2023_arm" {
 resource "aws_iam_role" "dashboard" {
   name = "aml-dashboard-ec2"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Action = "sts:AssumeRole", Principal = { Service = "ec2.amazonaws.com" } }]
   })
 }
@@ -52,16 +53,15 @@ resource "aws_iam_role_policy" "dashboard_code" {
   })
 }
 
-# approvals on the public dashboard need a passcode kept in SSM (create it once:
-#   aws ssm put-parameter --name /aml/bq2/approver_passcode --type SecureString --value <passcode>)
+# The BQ2 approval page checks a passcode kept in SSM Parameter Store (/aml/bq2/approver_passcode).
 resource "aws_iam_role_policy" "dashboard_passcode" {
   role = aws_iam_role.dashboard.id
   policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{ Effect = "Allow", Action = ["ssm:GetParameter"],
-    Resource = "arn:aws:ssm:${var.region}:*:parameter/aml/bq2/approver_passcode" }]
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = ["ssm:GetParameter"], Resource = "arn:aws:ssm:${var.region}:*:parameter/aml/bq2/approver_passcode" }]
   })
 }
+
 resource "aws_iam_instance_profile" "dashboard" {
   name = "aml-dashboard-ec2"
   role = aws_iam_role.dashboard.name
@@ -104,32 +104,13 @@ resource "aws_instance" "dashboard" {
     volume_type = "gp3"
   }
 
-  user_data = <<-EOT
-    #!/bin/bash
-    set -e
-    dd if=/dev/zero of=/swapfile bs=1M count=1024 && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-    dnf install -y python3.11 python3.11-pip
-    python3.11 -m venv /opt/dash
-    /opt/dash/bin/pip install pandas pyarrow numpy 'streamlit>=1.67' 'altair>=5' boto3
-    cat >/etc/systemd/system/dashboard.service <<'UNIT'
-    [Unit]
-    Description=AML dashboard (BQ1 and BQ2)
-    After=network-online.target
-    [Service]
-    Environment=AML_ROOT=s3://${var.bucket}
-    Environment=AWS_REGION=${var.region}
-    Environment=BQ2_APPROVAL_QUEUE_URL=${aws_sqs_queue.bq2_approvals.url}
-    ExecStartPre=/usr/bin/aws s3 sync s3://${var.bucket}/app-code /opt/app --delete
-    WorkingDirectory=/opt/app
-    ExecStart=/opt/dash/bin/streamlit run bq1_site.py --server.port 8501 --server.headless true
-    Restart=always
-    [Install]
-    WantedBy=multi-user.target
-    UNIT
-    mkdir -p /opt/app
-    systemctl daemon-reload
-    systemctl enable --now dashboard
-  EOT
+  # The startup script exactly as the running instance has it (CRLF line endings included): any change to
+  # this file replaces the instance (user_data_replace_on_change), so edit it only to rebuild on purpose.
+  user_data = file("${path.module}/dashboard_user_data.sh")
+
+  lifecycle {
+    ignore_changes = [ami] # the SSM parameter moves to each new AL2023 release; never replace the box for that
+  }
 
   tags = { Name = "aml-dashboard" }
 }

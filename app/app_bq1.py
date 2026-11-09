@@ -35,8 +35,23 @@ st.set_page_config(page_title="BQ1 · Early detection", layout="wide")
 
 
 @st.cache_data
-def load():
+def load_file():
     return json.loads((Path(__file__).parent / "data" / DATA_FILE).read_text())
+
+
+def load():
+    """Every week the weekly pipeline has finished, straight from Athena (analytics.live_*; aws_data.load_bq1_live,
+    cached 10 min), when AWS is configured. Otherwise, or if Athena fails, the saved file DATA_FILE, as before.
+    BQ1_SOURCE=file always uses the file."""
+    if os.environ.get("BQ1_SOURCE", "athena") != "file":
+        try:
+            import aws_data
+            if aws_data.enabled():
+                with st.spinner("Loading the weekly results from Athena…"):
+                    return aws_data.load_bq1_live()
+        except Exception as e:                    # never break the page: fall back to the saved file
+            print(f"[bq1] Athena unavailable, showing data/{DATA_FILE}: {e}")
+    return load_file()
 
 
 def pct(x):

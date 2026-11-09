@@ -5,7 +5,8 @@ Builds all of a week's features in ONE Spark application instead of three EMR jo
  -> txn_features (per payment, joins features_v2)
  -> features_v3 (+ x_/o_/t_ extras, reads both)
 
-    spark-submit build_week_features.py <dataset> <week_start> <week_end>
+    spark-submit build_week_features.py <dataset> <week_start> <week_end>   one week (scoring)
+    spark-submit build_week_features.py <dataset>                          whole dataset (training)
     e.g. build_week_features.py HI-Medium-joey 2022-09-12 2022-09-18
 
 The three builders are run unchanged (same code, same arguments as the three separate steps), so the
@@ -21,9 +22,9 @@ import sys
 import time
 
 STEPS = [
-    ("features_v2", "build_features_spark", lambda ds, a, b: [ds, a, b]),
-    ("txn_features", "build_txn_features_spark", lambda ds, a, b: [ds, "features_v2", a, b]),
-    ("features_v3", "build_features_v3_spark", lambda ds, a, b: [ds, a, b]),
+    ("features_v2", "build_features_spark", lambda ds, dates: [ds, *dates]),
+    ("txn_features", "build_txn_features_spark", lambda ds, dates: [ds, "features_v2", *dates]),
+    ("features_v3", "build_features_v3_spark", lambda ds, dates: [ds, *dates]),
 ]
 
 
@@ -37,13 +38,14 @@ def run_step(module_name, argv):
 
 
 def main():
-    if len(sys.argv) != 4:
-        raise SystemExit("usage: build_week_features.py <dataset> <week_start> <week_end>")
-    dataset, week_start, week_end = sys.argv[1:4]
+    if len(sys.argv) not in (2, 4):
+        raise SystemExit("usage: build_week_features.py <dataset> [<week_start> <week_end>]")
+    dataset, dates = sys.argv[1], sys.argv[2:4]          # no dates = the whole dataset
+    week_start, week_end = (dates + [None, None])[:2]
     seconds, spark = {}, None
     for name, module_name, args in STEPS:
         t0 = time.time()
-        spark = run_step(module_name, args(dataset, week_start, week_end))
+        spark = run_step(module_name, args(dataset, dates))
         seconds[name] = round(time.time() - t0)
         print(f"[week-features] {name} done in {seconds[name]}s")
     print("[week-features] " + json.dumps({"dataset": dataset, "week_start": week_start,

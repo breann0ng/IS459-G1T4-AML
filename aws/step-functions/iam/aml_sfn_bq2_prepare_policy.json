@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RunSharedPrepare",
+      "Effect": "Allow",
+      "Action": "states:StartExecution",
+      "Resource": "arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare"
+    },
+    {
+      "Sid": "WaitForPrepare",
+      "Effect": "Allow",
+      "Action": [
+        "states:DescribeExecution",
+        "states:StopExecution"
+      ],
+      "Resource": "arn:aws:states:us-east-1:390402569482:execution:aml_prepare:*"
+    },
+    {
+      "Sid": "SyncEvents",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutTargets",
+        "events:PutRule",
+        "events:DescribeRule"
+      ],
+      "Resource": "arn:aws:events:us-east-1:390402569482:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule"
+    }
+  ]
+}

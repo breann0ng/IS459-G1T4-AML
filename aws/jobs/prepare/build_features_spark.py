@@ -66,7 +66,9 @@ joins explode). Report the limit as an assumption.
 """
 
 import os
+import re
 import sys
+import time
 
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession, Window
@@ -79,7 +81,7 @@ ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never w
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
 
-FEATURES_TABLE = "features_v2"  # writes curated/<this> and curated/<this>_sample
+FEATURES_TABLE = os.environ.get("AML_FEATURES_TABLE", "features_v2")  # writes curated/<this> and curated/<this>_sample
 WINDOWS_DAYS = [3, 7, 14]      # fan-in / fan-out / gather-scatter windows
 ROLLING_DAYS = [3, 7, 14]      # rolling totals
 AMOUNT_MATCH = 0.10            # "same amount" = within 10% (pass-through matching)
@@ -111,6 +113,24 @@ DAY = 86400
 DISK = StorageLevel.MEMORY_AND_DISK
 
 spark = SparkSession.builder.appName(f"BuildFeatures-{DATASET}").getOrCreate()
+# Every feature family is computed and checkpointed in its own labelled Spark job before the final
+# join, instead of all of them inside the one write action. Same values (the checkpoint only keeps
+# rows); the Spark UI shows each family's time / memory / spill, and the families no longer share one
+# plan. Without this the final join planned every family's whole history at once, and that plan filled
+# the driver heap (HI-Medium week 2022-09-12: driver killed at 10 and 20 GB; with it, peak 2.3 GB).
+
+
+def materialise(df, name):
+    t0 = time.time()
+    spark.sparkContext.setJobDescription(f"v2 {name}")
+    # localCheckpoint (eager) keeps the same rows on the executors (memory + disk) but cuts the
+    # plan: the final join then plans 13 small leaves instead of every family's whole history,
+    # which is what filled the driver heap (re-planned after each stage, kept for the SQL UI).
+    df = df.localCheckpoint(eager=True)
+    n = df.count()
+    spark.sparkContext.setJobDescription(None)
+    print(f"[v2] {name}: {n} rows in {time.time() - t0:.0f}s", flush=True)
+    return df
 
 
 def rebalance(df, *cols):
@@ -138,18 +158,32 @@ def load_transactions():
     med_base = all_txns
     if OUTPUT_TO:
         med_base = med_base.filter(F.col("txn_date") <= F.lit(OUTPUT_TO).cast("date"))
-    med_paid = med_base.groupBy("payment_currency").agg(
-        F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
-    med_recv = med_base.groupBy("receiving_currency").agg(
-        F.expr("percentile_approx(amount_received, 0.5)").cast("double").alias("med_recv"))
+    # Both medians in ONE scan of the dataset (was two), collected to the driver (a few currencies),
+    # so the median sub-plan is not re-embedded in every later plan.
+    sides = med_base.select(F.explode(F.array(
+        F.struct(F.lit("paid").alias("side"), F.col("payment_currency").alias("ccy"),
+                 F.col("amount_paid").cast("double").alias("amt")),
+        F.struct(F.lit("recv").alias("side"), F.col("receiving_currency").alias("ccy"),
+                 F.col("amount_received").cast("double").alias("amt")))).alias("_s")).select("_s.*")
+    med = (sides.groupBy("side", "ccy")
+                .agg(F.expr("percentile_approx(amt, 0.5)").alias("med")).collect())
+    med_paid = spark.createDataFrame([(r["ccy"], r["med"]) for r in med if r["side"] == "paid"],
+                                     "payment_currency string, med_paid double")
+    med_recv = spark.createDataFrame([(r["ccy"], r["med"]) for r in med if r["side"] == "recv"],
+                                     "receiving_currency string, med_recv double")
     txns = all_txns
     if OUTPUT_FROM:
         start = F.date_sub(F.lit(OUTPUT_FROM).cast("date"), LOOKBACK_DAYS)
         txns = txns.filter(F.col("txn_date") >= start)
     if OUTPUT_TO:
         txns = txns.filter(F.col("txn_date") <= F.lit(OUTPUT_TO).cast("date"))
-    labels = (spark.read.parquet(f"{CURATED}/labels")
-                   .filter(F.col("dataset") == DATASET).select("txn_id", "is_laundering"))
+    labels = spark.read.parquet(f"{CURATED}/labels").filter(F.col("dataset") == DATASET)
+    if OUTPUT_FROM or OUTPUT_TO:
+        # A chunk only needs its own weeks' labels: prune label partitions by week instead of
+        # shuffling the whole dataset's labels into the join (grows with every week cleaned).
+        wk = txns.agg(F.min("week"), F.max("week")).first()
+        labels = labels.filter(F.col("week").between(wk[0], wk[1]))
+    labels = labels.select("txn_id", "is_laundering")
     t = txns.join(labels, "txn_id", "left")
 
     try:   # pattern type per payment; a payment in several schemes keeps the first scheme
@@ -173,7 +207,13 @@ def load_transactions():
              .withColumn("rel_paid", F.col("amount_paid").cast("double") / F.col("med_paid"))
              .withColumn("rel_recv", F.col("amount_received").cast("double") / F.col("med_recv"))
              .withColumn("src", node("from_bank", "from_account"))
-             .withColumn("dst", node("to_bank", "to_account")))
+             .withColumn("dst", node("to_bank", "to_account"))
+             # only the columns later steps read: main() caches this, and a cache keeps (and the
+             # scan reads) every column it is given
+             .select("txn_id", "src", "dst", "ts", "txn_date", "week", "night", "round_amt",
+                     "payment_format", "is_cross_currency", "is_self_transfer", "is_laundering",
+                     "pattern_type", "payment_currency", "receiving_currency",
+                     "amount_paid", "amount_received", "rel_paid", "rel_recv"))
 
 
 # =========================================================== account events + same-day stats
@@ -210,14 +250,17 @@ def account_events(t):
 def same_day_features(ev):
     is_in, is_out = F.col("dir") == "in", F.col("dir") == "out"
     other = F.col("self") == 0
+    # size(collect_set) = countDistinct (both skip nulls), but 4 countDistincts on different columns
+    # make Spark Expand every event row 5x before the shuffle; per account-day sets are small.
+    n_distinct = lambda c: F.size(F.collect_set(c))
     return (ev.groupBy("acct", "txn_date")
         .agg(F.max("week").alias("week"),
              F.sum(is_in.cast("int")).alias("n_in"),
              F.sum(is_out.cast("int")).alias("n_out"),
-             F.countDistinct(F.when(is_in & other, F.col("cp"))).alias("n_senders"),
-             F.countDistinct(F.when(is_out & other, F.col("cp"))).alias("n_receivers"),
-             F.countDistinct("payment_format").alias("n_formats"),
-             F.countDistinct("ccy").alias("n_currencies"),
+             n_distinct(F.when(is_in & other, F.col("cp"))).alias("n_senders"),
+             n_distinct(F.when(is_out & other, F.col("cp"))).alias("n_receivers"),
+             n_distinct("payment_format").alias("n_formats"),
+             n_distinct("ccy").alias("n_currencies"),
              F.sum("cross").alias("n_cross_ccy"),
              F.sum("self").alias("n_self"),
              F.avg("night").alias("night_share"),
@@ -242,13 +285,14 @@ def same_day_features(ev):
 
 
 def rolling_features(daily):
-    first_date = daily.select(F.min("date")).first()[0]
-    daily = daily.withColumn("day_idx", F.datediff("date", F.lit(first_date)))
+    # Range windows and age depend on day differences, not the choice of origin.
+    # A fixed origin avoids a full aggregation + driver round-trip for min(date).
+    daily = daily.withColumn("day_idx", F.datediff("date", F.lit("1970-01-01")))
     by_day = Window.partitionBy("acct").orderBy("day_idx")
     last = lambda k: by_day.rangeBetween(-(k - 1), 0)
-    for k in ROLLING_DAYS:
-        for c in ("n_in", "n_out", "n_senders", "n_receivers", "n_pass_24h"):
-            daily = daily.withColumn(f"{c}_{k}d", F.sum(c).over(last(k)))
+    # one select, not 15 chained withColumns (each one re-analyses the whole plan on the driver)
+    daily = daily.select("*", *[F.sum(c).over(last(k)).alias(f"{c}_{k}d") for k in ROLLING_DAYS
+                                for c in ("n_in", "n_out", "n_senders", "n_receivers", "n_pass_24h")])
     return (daily
         .withColumn("io_ratio", F.when(F.col("amt_in_rel") > 0, F.col("amt_out_rel") / F.col("amt_in_rel")))
         .withColumn("active_days_7d", F.count(F.lit(1)).over(last(7)))
@@ -259,21 +303,44 @@ def rolling_features(daily):
 
 
 # ============================================================= exact sliding distinct counts
-def sliding_distinct_max(edges, key_cols, cp_col, W, out_name):
-    """For each key and day: the most distinct counterparties seen within any W-second window
-    ending during that day. Exact and O(n log n): each key-counterparty pair is merged into
-    'active runs' (payments less than W apart); a run counts from its first payment until W
-    after its last. A running sum of +1 (run starts) / -1 (run expires) gives the live count,
-    and a 0-event at every payment reads it."""
+def active_runs(edges, key_cols, cp_col, W):
+    """Merge each key-counterparty's payments into runs separated by more than W seconds."""
     pair = Window.partitionBy(*key_cols, cp_col).orderBy("ts")
-    runs = (edges
+    return (edges
         .withColumn("_new", (F.lag("ts").over(pair).isNull()
                              | (F.col("ts") - F.lag("ts").over(pair) > W)).cast("int"))
         .withColumn("_run", F.sum("_new").over(pair.rowsBetween(Window.unboundedPreceding, 0)))
         .groupBy(*key_cols, cp_col, "_run")
         .agg(F.min("ts").alias("start"), F.max("ts").alias("last")))
-    ev = (runs.select(*key_cols, F.col("start").alias("t"), F.lit(1).alias("delta"))
-          .unionByName(runs.select(*key_cols, (F.col("last") + W + 1).alias("t"), F.lit(-1).alias("delta")))
+
+
+def run_events(runs, key_cols, W):
+    """Emit both endpoints in one pass, so the run-building plan is not duplicated."""
+    return (runs.select(*key_cols, F.explode(F.array(
+                F.struct(F.col("start").alias("t"), F.lit(1).alias("delta")),
+                F.struct((F.col("last") + W + 1).alias("t"), F.lit(-1).alias("delta"))
+            )).alias("_event"))
+            .select(*key_cols, "_event.*"))
+
+
+def directional_edges(edges):
+    """One input scan yields incoming and outgoing counterparty edges."""
+    return (edges.select("ts", F.explode(F.array(
+                F.struct(F.col("dst").alias("acct"), F.col("src").alias("cp"), F.lit("in").alias("dir")),
+                F.struct(F.col("src").alias("acct"), F.col("dst").alias("cp"), F.lit("out").alias("dir"))
+            )).alias("_edge"))
+            .select("ts", "_edge.*"))
+
+
+def sliding_distinct_max(edges, key_cols, cp_col, W, out_name, runs=None):
+    """For each key and day: the most distinct counterparties seen within any W-second window
+    ending during that day. Exact and O(n log n): each key-counterparty pair is merged into
+    'active runs' (payments less than W apart); a run counts from its first payment until W
+    after its last. A running sum of +1 (run starts) / -1 (run expires) gives the live count,
+    and a 0-event at every payment reads it."""
+    if runs is None:
+        runs = active_runs(edges, key_cols, cp_col, W)
+    ev = (run_events(runs, key_cols, W)
           .unionByName(edges.select(*key_cols, F.col("ts").alias("t"), F.lit(0).alias("delta"))))
     live = (Window.partitionBy(*key_cols).orderBy("t", F.col("delta").desc())
                   .rowsBetween(Window.unboundedPreceding, 0))
@@ -283,25 +350,14 @@ def sliding_distinct_max(edges, key_cols, cp_col, W, out_name):
               .agg(F.max("n").alias(out_name)))
 
 
-def gather_scatter_max(edges, W, out_name):
+def gather_scatter_max(edges, W, out_name, runs=None):
     """Like sliding_distinct_max, but tracks distinct senders AND receivers together and
     reports the most min(senders, receivers) reached during the day."""
-    def runs(df):
-        pair = Window.partitionBy("acct", "cp").orderBy("ts")
-        return (df
-            .withColumn("_new", (F.lag("ts").over(pair).isNull()
-                                 | (F.col("ts") - F.lag("ts").over(pair) > W)).cast("int"))
-            .withColumn("_run", F.sum("_new").over(pair.rowsBetween(Window.unboundedPreceding, 0)))
-            .groupBy("acct", "cp", "_run").agg(F.min("ts").alias("start"), F.max("ts").alias("last")))
-
-    ins = edges.select(F.col("dst").alias("acct"), F.col("src").alias("cp"), "ts")
-    outs = edges.select(F.col("src").alias("acct"), F.col("dst").alias("cp"), "ts")
-    r_in, r_out = runs(ins), runs(outs)
-    ev = (r_in.select("acct", F.col("start").alias("t"), F.lit(1).alias("d_in"), F.lit(0).alias("d_out"))
-          .unionByName(r_in.select("acct", (F.col("last") + W + 1).alias("t"), F.lit(-1).alias("d_in"), F.lit(0).alias("d_out")))
-          .unionByName(r_out.select("acct", F.col("start").alias("t"), F.lit(0).alias("d_in"), F.lit(1).alias("d_out")))
-          .unionByName(r_out.select("acct", (F.col("last") + W + 1).alias("t"), F.lit(0).alias("d_in"), F.lit(-1).alias("d_out")))
-          .withColumn("delta", F.col("d_in") + F.col("d_out")))
+    if runs is None:
+        runs = active_runs(directional_edges(edges), ["acct", "dir"], "cp", W)
+    ev = (run_events(runs, ["acct", "dir"], W)
+          .withColumn("d_in", F.when(F.col("dir") == "in", F.col("delta")).otherwise(0))
+          .withColumn("d_out", F.when(F.col("dir") == "out", F.col("delta")).otherwise(0)))
     live = (Window.partitionBy("acct").orderBy("t", F.col("delta").desc())
                   .rowsBetween(Window.unboundedPreceding, 0))
     return (ev.withColumn("m", F.least(F.sum("d_in").over(live), F.sum("d_out").over(live)))
@@ -355,11 +411,18 @@ def scatter_gather_features(small):
     hop_out = p.groupBy(F.col("S").alias("acct"), "date").agg(F.countDistinct("D").alias("hop2_out"))
     hop_in = p.groupBy(F.col("D").alias("acct"), "date").agg(F.countDistinct("S").alias("hop2_in"))
     through = (p.groupBy(F.col("M").alias("acct"), "date")
-                .agg(F.countDistinct(F.concat_ws(">", "S", "D")).alias("mid_paths")))
-    return (as_src.join(as_dst, ["acct", "date"], "full")
-                  .join(hop_out, ["acct", "date"], "full")
-                  .join(hop_in, ["acct", "date"], "full")
-                  .join(through, ["acct", "date"], "full"))
+                .agg(F.countDistinct("S", "D").alias("mid_paths")))     # pairs, no string building
+    # Each part has one row per (acct, date): union + one max-aggregate = the 4 full outer joins,
+    # with one shuffle instead of four sort-merge joins.
+    cols = ["sg_src_max", "sg_dst_max", "hop2_out", "hop2_in", "mid_paths"]
+    out = as_src
+    for part in (as_dst, hop_out, hop_in, through):
+        out = out.unionByName(part, allowMissingColumns=True)
+    out = out.groupBy("acct", "date").agg(*[F.max(c).alias(c) for c in cols])
+    try:
+        return materialise(out, "scatter_gather")
+    finally:
+        paths.unpersist()
 
 
 def cycle_features(small):
@@ -372,11 +435,15 @@ def cycle_features(small):
                  F.col("ts").alias("first_ts"), F.col("ts").alias("last_ts"),
                  F.array("src", "dst").alias("nodes"), F.array("txn_id").alias("txns"))
     loops = None
+    cached = [E]
     for hops in range(2, CYCLE_MAX_HOPS + 1):
         j = P.alias("p").join(E.alias("e"),
                               (F.col("p.cur") == F.col("e.src"))
                               & (F.col("e.ts") >= F.col("p.last_ts"))
                               & (F.col("e.ts") <= F.col("p.first_ts") + W))
+        if hops < CYCLE_MAX_HOPS:      # read twice (loops closed now + paths extended): join once
+            j = j.persist(DISK)
+            cached.append(j)
         closed = (j.filter(F.col("e.dst") == F.col("p.start"))
                    .select(F.col("p.nodes").alias("nodes"), F.col("e.ts").alias("close_ts"),
                            F.concat("p.txns", F.array("e.txn_id")).alias("txns")))
@@ -400,8 +467,13 @@ def cycle_features(small):
     loops = (loops.withColumn("date", F.to_date(F.from_unixtime("close_ts")))
                   .withColumn("_key", F.concat_ws(",", F.array_sort("nodes")))
                   .dropDuplicates(["_key", "date"]))
-    return (loops.select(F.explode("nodes").alias("acct"), "date")
-                 .groupBy("acct", "date").agg(F.count(F.lit(1)).alias("cycles_today")))
+    out = (loops.select(F.explode("nodes").alias("acct"), "date")
+                .groupBy("acct", "date").agg(F.count(F.lit(1)).alias("cycles_today")))
+    try:
+        return materialise(out, "cycles")
+    finally:
+        for df in cached:
+            df.unpersist()
 
 
 def one_hop_features(ev, daily):
@@ -422,6 +494,40 @@ def one_hop_features(ev, daily):
 
 
 # ================================================================================= main
+def fan_windows_needed():
+    """The 9 fan-in / fan-out / gather-scatter window features cost ~9 min a run. Compute them only
+    while a model still uses them: the BQ1 champion (detector or namer), the BQ1 recipe BQ2 trains
+    with (models/final/meta.json), or any BQ2 model version (models/bq2r/<dataset>/<version>/).
+    AML_FAN_WINDOWS=1 / 0 forces it. If the champion or the recipe cannot be read, compute them
+    (safe default)."""
+    force = os.environ.get("AML_FAN_WINDOWS", "").strip()
+    if force in ("0", "1"):
+        return force == "1"
+    import json
+    rx = r"(^|_)(fanin|fanout|gs)_max_\d+d$"
+    uses = lambda meta: [c for c in meta.get("stage1_features", []) + meta.get("namer_features", [])
+                         if re.search(rx, c)]
+    try:
+        read = lambda path: json.loads("\n".join(r.value for r in spark.read.text(path).collect()))
+        run = read(f"{ROOT}/models/bq1_champion.json")["run"]
+        metas = {f"champion {run}": read(f"{ROOT}/models/{run}/meta.json"),
+                 "BQ2 recipe models/final": read(f"{ROOT}/models/final/meta.json")}
+    except Exception as e:                       # no champion yet, unreadable meta, ...
+        print(f"[v2] could not read a model's meta ({e}); computing fan/gs windows", flush=True)
+        return True
+    try:                                         # BQ2 versions (none yet in a fresh bucket)
+        for path, text in spark.sparkContext.wholeTextFiles(f"{ROOT}/models/bq2r/*/*/meta.json").collect():
+            metas["BQ2 " + "/".join(path.split("/")[-3:-1])] = json.loads(text)
+    except Exception:
+        pass
+    need = False
+    for who, meta in metas.items():
+        used = uses(meta)
+        print(f"[v2] {who} uses {len(used)} fan/gs window features", flush=True)
+        need = need or bool(used)
+    return need
+
+
 def main():
     t = load_transactions().persist(DISK)
     edges = t.filter(~F.col("is_self_transfer")).select("src", "dst", "ts", "txn_id").persist(DISK)
@@ -429,17 +535,34 @@ def main():
     ev = account_events(t).persist(DISK)
     daily = same_day_features(ev).persist(DISK)
     feats = rolling_features(daily)
-    feats = feats.join(one_hop_features(ev, daily), ["acct", "date"], "left")
+    feats = feats.join(materialise(one_hop_features(ev, daily), "one_hop"), ["acct", "date"], "left")
+    feats = materialise(feats, "rolling+one_hop")
+    # Fill the edges cache while t is still cached, then free t / ev / daily: the checkpoint above
+    # cut feats' lineage, so nothing reads them again, and the fan / multi-hop steps get the memory.
+    spark.sparkContext.setJobDescription("v2 edges")
+    edges.count()
+    spark.sparkContext.setJobDescription(None)
+    for df in (t, ev, daily):
+        df.unpersist()
 
     fan_cols = []
-    for w in WINDOWS_DAYS:
+    for w in (WINDOWS_DAYS if fan_windows_needed() else []):
         W = w * DAY
         e_w = since(edges, w)          # chunk mode: only the w days of history this window needs
+        # All three features use the same runs. Cache the narrow run table once per window;
+        # release it once the three results have been eagerly checkpointed.
+        runs = active_runs(directional_edges(e_w), ["acct", "dir"], "cp", W).persist(DISK)
         fin = sliding_distinct_max(e_w.select(F.col("dst").alias("acct"), F.col("src").alias("cp"), "ts"),
-                                   ["acct"], "cp", W, f"fanin_max_{w}d")
+                                   ["acct"], "cp", W, f"fanin_max_{w}d", runs=runs.filter("dir = 'in'"))
         fout = sliding_distinct_max(e_w.select(F.col("src").alias("acct"), F.col("dst").alias("cp"), "ts"),
-                                    ["acct"], "cp", W, f"fanout_max_{w}d")
-        gs = gather_scatter_max(e_w, W, f"gs_max_{w}d")
+                                    ["acct"], "cp", W, f"fanout_max_{w}d", runs=runs.filter("dir = 'out'"))
+        gs = gather_scatter_max(e_w, W, f"gs_max_{w}d", runs=runs)
+        try:
+            fin = materialise(fin, f"fanin_{w}d")
+            fout = materialise(fout, f"fanout_{w}d")
+            gs = materialise(gs, f"gather_scatter_{w}d")
+        finally:
+            runs.unpersist()
         feats = (feats.join(fin, ["acct", "date"], "left")
                       .join(fout, ["acct", "date"], "left")
                       .join(gs, ["acct", "date"], "left"))
@@ -448,19 +571,23 @@ def main():
     graph_cols = []
     if USE_SCATTER_GATHER or USE_CYCLES:
         small = non_hub_edges(edges).persist(DISK)
+        spark.sparkContext.setJobDescription("v2 non-hub edges")
+        small.count()                  # fill small's cache, then edges is no longer read
+        spark.sparkContext.setJobDescription(None)
+        edges.unpersist()
         if USE_SCATTER_GATHER:
-            feats = feats.join(scatter_gather_features(since(small, 2 * SG_WINDOW_DAYS)), ["acct", "date"], "left")
+            sg = scatter_gather_features(since(small, 2 * SG_WINDOW_DAYS))   # materialised inside
+            feats = feats.join(sg, ["acct", "date"], "left")
             graph_cols += ["sg_src_max", "sg_dst_max", "hop2_out", "hop2_in", "mid_paths"]
         if USE_CYCLES:
-            feats = feats.join(cycle_features(since(small, CYCLE_WINDOW_DAYS + 6)), ["acct", "date"], "left")
+            cyc = cycle_features(since(small, CYCLE_WINDOW_DAYS + 6))        # materialised inside
+            feats = feats.join(cyc, ["acct", "date"], "left")
             feats = feats.fillna(0, subset=["cycles_today"])
-            # from the cached daily table (same dates as feats): asking feats itself ran the
-            # whole uncached feature plan once extra just to find this date
-            first_date = daily.select(F.min("date")).first()[0]
-            last7 = (Window.partitionBy("acct").orderBy(F.datediff("date", F.lit(first_date)))
+            last7 = (Window.partitionBy("acct").orderBy(F.datediff("date", F.lit("1970-01-01")))
                            .rangeBetween(-6, 0))
             feats = feats.withColumn("cycles_7d", F.sum("cycles_today").over(last7))
             graph_cols += ["cycles_today", "cycles_7d"]
+        small.unpersist()
 
     feature_cols = (
         ["n_in", "n_out", "n_senders", "n_receivers", "n_formats", "n_currencies", "n_cross_ccy",
@@ -483,6 +610,7 @@ def main():
           for c in feature_cols])
     if OUTPUT_FROM:                    # drop the history days: they belong to the previous chunk
         features = features.filter(F.col("date") >= F.lit(OUTPUT_FROM).cast("date"))
+    spark.sparkContext.setJobDescription("v2 final join + write")
     features = features.persist(DISK)
 
     path = f"{CURATED}/{FEATURES_TABLE}"
@@ -494,9 +622,11 @@ def main():
     rebalance(sample, "dataset", "week").write.mode("overwrite") \
           .partitionBy("dataset", "week").parquet(f"{CURATED}/{FEATURES_TABLE}_sample")
 
-    by_label = {r["label"]: r["count"] for r in features.groupBy("label").count().collect()}
-    by_pattern = {r["pattern_label"]: r["count"] for r in
-                  features.filter("label = 1").groupBy("pattern_label").count().collect()}
+    by_label, by_pattern = {}, {}      # one pass over features for both summaries (was two)
+    for r in features.groupBy("label", "pattern_label").count().collect():
+        by_label[r["label"]] = by_label.get(r["label"], 0) + r["count"]
+        if r["label"] == 1:
+            by_pattern[r["pattern_label"]] = r["count"]
     chunk = f" {OUTPUT_FROM or 'start'} to {OUTPUT_TO or 'end'}" if (OUTPUT_FROM or OUTPUT_TO) else ""
     print(f"[features] {DATASET}{chunk}: account-days by label {by_label}")
     print(f"[features] laundering account-days by pattern: {dict(sorted(by_pattern.items()))}")

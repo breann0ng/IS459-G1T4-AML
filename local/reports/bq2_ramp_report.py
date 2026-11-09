@@ -14,7 +14,7 @@ import pandas as pd
 
 import os as _os, sys as _sys                # pipeline modules live in aws/jobs/<folder>/
 _JOBS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "aws", "jobs")
-_sys.path[:0] = [_os.path.join(_JOBS, d) for d in ("bq2", "bq1", "features", "clean", "load")]
+_sys.path[:0] = [_os.path.join(_JOBS, d) for d in ("bq2", "bq1", "prepare")]
 import bq2_common as C
 T = C          # storage helpers live in bq2_common (no train_txn.py needed on the laptop)
 

@@ -9,8 +9,8 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-JOBS = os.path.join(HERE, "..")                             # repo: aws/jobs/<load|clean|features|bq1|bq2>/
-for p in [HERE] + [os.path.join(JOBS, d) for d in ("bq1", "features", "clean", "load")]:
+JOBS = os.path.join(HERE, "..")                             # repo: aws/jobs/<prepare|bq1|bq2>/
+for p in [HERE] + [os.path.join(JOBS, d) for d in ("bq1", "prepare")]:
     if os.path.isdir(p) and p not in sys.path:               # EMR Serverless: one flat zip, nothing to add
         sys.path.insert(0, p)
 

@@ -28,7 +28,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 BUCKET = "is459-g1t4-aml"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 SRC = sys.argv[1] if len(sys.argv) > 1 else "HI-Large"
 OUT = sys.argv[2] if len(sys.argv) > 2 else f"{SRC}-live"
 FROM = sys.argv[3] if len(sys.argv) > 3 else None

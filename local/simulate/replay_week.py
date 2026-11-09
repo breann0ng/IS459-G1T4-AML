@@ -10,7 +10,7 @@ aml_bq1_weekly Step Functions run (the part files' own S3 events are ignored). N
          Use it when replaying several weeks in a row (e.g. the 3 history weeks): a week's features
          read the weeks before it, so the state machine refuses a week whose previous week is not done.
 
-Weeks are Mondays. staging/ is filled once by aws/jobs/load/split_weeks_spark.py.
+Weeks are Mondays. staging/ is filled once by aws/jobs/prepare/split_weeks_spark.py.
 """
 import argparse
 import datetime as dt

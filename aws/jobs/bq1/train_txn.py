@@ -44,6 +44,7 @@ Stage 2 end to end (written to analytics/txn_stage2, alerts to analytics/txn_ale
 """
 
 import argparse
+import re
 import warnings
 import gc
 import resource
@@ -115,6 +116,23 @@ STAGE2_META = ["dataset", "week", "acct_bank", "acct", "date", "label", "first_l
 # =========================================================================================
 
 META = ["dataset", "week", "txn_id", "date", "s_id", "r_id", "label", "pattern_label"]
+
+# AML_DROP_FEATURES: leave feature columns out of every model (detector and namer) in one place.
+# A preset name or a regex; unset = all features (the default). "fan_windows" = the 9 sliding
+# fan-in / fan-out / gather-scatter windows (s_/r_ prefixed in the detector, bare in the namer):
+# on validation they changed account-day F1 by less than the seed-to-seed noise (8 Nov 2026).
+DROP_PRESETS = {"fan_windows": r"(^|_)(fanin|fanout|gs)_max_\d+d$"}
+
+
+def drop_features(cols):
+    name = os.environ.get("AML_DROP_FEATURES", "").strip()
+    if not name:
+        return list(cols)
+    rx = DROP_PRESETS.get(name, name)
+    dropped = [c for c in cols if re.search(rx, c)]
+    print(f"[features] AML_DROP_FEATURES={name}: dropped {len(dropped)}: {', '.join(dropped)}", flush=True)
+    return [c for c in cols if c not in dropped]
+
 CURATED, ANALYTICS = f"{ROOT}/curated", f"{ROOT}/analytics"
 RUN_AT = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 RUN_ID = time.strftime("%Y%m%d%H%M%S", time.gmtime())
@@ -253,6 +271,9 @@ def main():
     ap.add_argument("--preset", choices=list(PRESETS), help="tuning preset (p1, p2, p3)")
     ap.add_argument("--drop-format", action="store_true",
                     help="ablation: remove every payment-format column (t_fmt_*, s_/r_n_formats)")
+    ap.add_argument("--drop-regex", default=None,
+                    help="ablation: remove every feature column whose name matches this regex, "
+                         "e.g. '^[sr]_(fanin|fanout|gs)_max_(3|7)d$'")
     ap.add_argument("--drop-account-features", action="store_true",
                     help="ablation: payment's own features only (no s_/r_ columns)")
     ap.add_argument("--txn-table", default="txn_features",
@@ -280,13 +301,19 @@ def main():
     keep = [c for c in sample_ds.schema.names if c not in ("txn_id", "s_id", "r_id", "week", "pattern_label")]
     sample = sample_ds.to_table(columns=keep, filter=ds.field("dataset").isin(TRAIN_DATASETS)).to_pandas()
     sample["date"] = pd.to_datetime(sample["date"]).dt.date
-    feat = [c for c in sample.columns if c not in META]
+    feat = drop_features([c for c in sample.columns if c not in META])
     if a.drop_account_features:
         feat = [c for c in feat if c.startswith("t_")]
     a.groups = {g for g in a.new_groups.split(",") if g}
     feat = keep_groups(feat, a.groups)
     if a.drop_format:
         feat = [c for c in feat if not (c.startswith("t_fmt_") or c.endswith("n_formats"))]
+    if a.drop_regex:
+        dropped = [c for c in feat if re.search(a.drop_regex, c)]
+        if not dropped:
+            ap.error(f"--drop-regex {a.drop_regex!r} matches no feature column")
+        feat = [c for c in feat if c not in dropped]
+        print(f"[ablation] dropped {len(dropped)} features: {', '.join(dropped)}", flush=True)
     train_end = {}
     for d in TRAIN_DATASETS:
         days = sorted(sample.loc[sample["dataset"] == d, "date"].unique())
@@ -428,7 +455,7 @@ def stage2_end_to_end(a, train_end, rollups, thr):
         filter=ds.field("dataset").isin(list(train_end)) & (ds.field("label") == 1)).to_pandas()
     smp["date"] = pd.to_datetime(smp["date"]).dt.date
     smp = smp[[dt_ <= train_end[d] for d, dt_ in zip(smp["dataset"], smp["date"])]]
-    f2 = keep_groups([c for c in smp.columns if c not in STAGE2_META], a.groups)
+    f2 = drop_features(keep_groups([c for c in smp.columns if c not in STAGE2_META], a.groups))
     y2 = pattern_of(smp["pattern_label"], merge)
     namer = LGBMClassifier(objective="multiclass", **STAGE2_PARAMS)
     namer.fit(smp[f2].to_numpy(np.float32), y2, sample_weight=compute_sample_weight("balanced", y2))

@@ -18,8 +18,7 @@ import sys
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-BUCKET = "pw-aml-g1t4"
-ROOT = os.environ.get("AML_ROOT", f"s3://{BUCKET}")
+ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 DATASET, DATE_FROM, DATE_TO = sys.argv[1], sys.argv[2], sys.argv[3]
 
 # Kaggle column order (both account columns are called "Account" in the file; .1 marks the receiver)

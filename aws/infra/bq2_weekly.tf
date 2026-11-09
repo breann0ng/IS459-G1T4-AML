@@ -4,7 +4,7 @@
 
 variable "bq2_notify_emails" {
   type        = list(string)
-  default     = []
+  default     = ["weiting.yeo.2024@computing.smu.edu.sg"]
   description = "Who is emailed when a retrain/deploy approval is needed. Empty = no subscriptions."
 }
 
@@ -129,9 +129,9 @@ data "aws_iam_policy_document" "sfn_bq2" {
     resources = ["arn:aws:events:${var.region}:${data.aws_caller_identity.me.account_id}:rule/StepFunctionsGetEventsForEMRServerlessJobRule"]
   }
   statement {
-    sid       = "Pointer"
-    actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["arn:aws:s3:::${var.bucket}/progress/bq2_weekly.json", "arn:aws:s3:::${var.bucket}/progress/bq2/*",
+    sid     = "Pointer"
+    actions = ["s3:GetObject", "s3:PutObject"]
+    resources = ["arn:aws:s3:::${var.bucket}/progress/bq2_weekly.json", "arn:aws:s3:::${var.bucket}/progress/bq2/*", # skip markers
     "arn:aws:s3:::${var.bucket}/models/bq2r/*"]
   }
   statement {
@@ -163,11 +163,17 @@ resource "aws_iam_role_policy" "sfn_bq2" {
 resource "aws_sfn_state_machine" "bq2_weekly" {
   name       = "aml_bq2_weekly"
   role_arn   = aws_iam_role.sfn_bq2.arn
-  definition = file("${path.module}/../step-functions/aml_bq2_weekly.json")
+  definition = file("${path.module}/../step-functions/aml_bq2_weekly.asl.json")
   logging_configuration {
     log_destination        = "${aws_cloudwatch_log_group.bq2_weekly.arn}:*"
     include_execution_data = true
     level                  = "ERROR"
+  }
+
+  # The live definition is deployed by the BQ2 team (aws/step-functions/aml_bq2_weekly.asl.json, via the console
+  # or CLI) when they switch it over; an infrastructure apply must never swap it under a running pipeline.
+  lifecycle {
+    ignore_changes = [definition]
   }
 }
 
@@ -222,8 +228,8 @@ locals {
       { Effect = "Allow", Action = ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
       Resource = "arn:aws:athena:${var.region}:${data.aws_caller_identity.me.account_id}:workgroup/${aws_athena_workgroup.aml.name}" },
       { Effect = "Allow", Action = ["glue:GetDatabase", "glue:GetTable", "glue:GetTables", "glue:GetPartitions"],
-      Resource = ["arn:aws:glue:${var.region}:${data.aws_caller_identity.me.account_id}:catalog",
-        "arn:aws:glue:${var.region}:${data.aws_caller_identity.me.account_id}:database/analytics",
+        Resource = ["arn:aws:glue:${var.region}:${data.aws_caller_identity.me.account_id}:catalog",
+          "arn:aws:glue:${var.region}:${data.aws_caller_identity.me.account_id}:database/analytics",
       "arn:aws:glue:${var.region}:${data.aws_caller_identity.me.account_id}:table/analytics/bq2r_*"] },
       { Effect = "Allow", Action = ["s3:GetObject"],
         Resource = ["arn:aws:s3:::${var.bucket}/analytics/bq2r_*", "arn:aws:s3:::${var.bucket}/models/bq2r/*",

@@ -12,7 +12,7 @@ it and run the same command again.
     python local/runs/run_final_serverless.py --list                   step names, done or not
 
 Before the first run (see the steps in local/runs/README.md):
-    raw/ has HI-Small, HI-Medium, HI-Large       (aws/jobs/load/load_kaggle.sh, in CloudShell)
+    raw/ has HI-Small, HI-Medium, HI-Large       (aws/jobs/prepare/load_kaggle.sh, in CloudShell)
     jobs/jobs.zip + entry scripts                (aws/deploy/deploy.sh, from main)
     jobs/venv.tar.gz                             (aws/deploy/build_venv.sh, needs Docker)
 
