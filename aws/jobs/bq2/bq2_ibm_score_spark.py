@@ -7,7 +7,8 @@ and keep what BQ2 needs per week. Safe to run in chunks: each run replaces only 
 Run (EMR, after the HI-Large features exist for the window; start on a Monday, end on a Sunday):
     spark-submit [S3 confs] [driver confs] --conf spark.pyspark.python=/usr/bin/python3 \
         bq2_ibm_score_spark.py HI-Large 2022-08-29 2022-09-04
-Models: env BQ2_MODELS, default "all=models/final,nofan=models/final_nofan"
+Models: env BQ2_MODELS, default "all=models/final,nofan=models/final_nofan"; a folder may be an s3:// path,
+        and a trailing "?" makes it optional (skipped until it exists)
         (each folder holds stage1.txt + meta.json with its own frozen threshold)
 
 Reads   models/<each>/, curated/txn_features_v3, curated/features_v3
@@ -40,7 +41,13 @@ MODELS = dict(m.split("=", 1) for m in
               os.environ.get("BQ2_MODELS", "all=models/final,nofan=models/final_nofan").split(","))
 KEEP_RANK = 5000                    # each model's top K account-days per day are kept (budget views)
 DISK = StorageLevel.MEMORY_AND_DISK
-CURATED, ANALYTICS = f"{ROOT}/curated", f"{ROOT}/analytics"
+# Input data can come from another root / dataset name than where BQ2 writes (e.g. BQ1's shared data):
+#   AML_DATA_ROOT=s3://<bucket>  (curated/ is read there; default AML_ROOT)
+#   AML_SRC_DATASET=HI-Large-live (the dataset partition read; default = the dataset argument, which still
+#                                  names everything BQ2 writes, so the dashboard and decisions keep "HI-Large")
+DATA_ROOT = os.environ.get("AML_DATA_ROOT", "").rstrip("/") or ROOT
+SRC = os.environ.get("AML_SRC_DATASET", "") or DATASET
+CURATED, ANALYTICS = f"{DATA_ROOT}/curated", f"{ROOT}/analytics"
 
 spark = SparkSession.builder.appName(f"BQ2Score-{DATASET}").getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
@@ -49,6 +56,11 @@ spark.conf.set("spark.sql.adaptive.enabled", "true")
 spark.conf.set("spark.sql.ansi.enabled", "false")
 spark.conf.set("spark.sql.shuffle.partitions", os.environ.get("AML_SHUFFLE", "400"))
 spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "20000")
+
+
+def model_path(d):
+    """A BQ2_MODELS folder: absolute s3:// path, or relative to AML_ROOT."""
+    return d.rstrip("/") if d.startswith("s3://") else f"{ROOT}/{d.strip('/')}"
 
 
 def text(path):
@@ -67,14 +79,58 @@ def write(df, name):
        .partitionBy("dataset", "week").parquet(f"{ANALYTICS}/{name}"))
 
 
+def drop_missing_models():
+    """BQ2_MODELS entries ending in "?" are optional (e.g. the retrained challenger before any retrain): skipped
+    while their folder has no meta.json."""
+    for m, d in list(MODELS.items()):
+        if d.endswith("?"):
+            MODELS[m] = d = d[:-1]
+            try:
+                text(f"{model_path(d)}/meta.json")
+            except Exception:
+                print(f"[bq2] optional model {m} ({d}) not trained yet: skipped")
+                del MODELS[m]
+
+
+def bq1_finished():
+    """BQ2_WAIT_FOR_BQ1=1: score a week only when BQ1's own run log says that week finished, so a week BQ1 is still
+    (re)building is never scored half-built. Accepted: the weekly pipeline's progress/bq1_weekly/<dataset>/<Monday>.json
+    with status SUCCEEDED, or aml_bq1_score's progress/bq1/<dataset>/<week>/check.json."""
+    from datetime import date
+    data_root = DATA_ROOT
+    n = (date.fromisoformat(DATE_FROM) - date(2022, 8, 1)).days // 7 + 1
+    try:
+        log = json.loads(text(f"{data_root}/progress/bq1_weekly/{SRC}/{DATE_FROM}.json"))
+        log = json.loads(log) if isinstance(log, str) else log
+        if log.get("status") == "SUCCEEDED":
+            return f"progress/bq1_weekly/{SRC}/{DATE_FROM}.json: SUCCEEDED"
+        print(f"[bq2-score] BQ1 log for {DATE_FROM}: {log.get('status')}")
+    except Exception:
+        pass
+    for wk in (DATE_FROM, str(n), f"week={n}"):
+        try:
+            text(f"{data_root}/progress/bq1/{SRC}/{wk}/check.json")
+            return f"progress/bq1/{SRC}/{wk}/check.json"
+        except Exception:
+            pass
+    return None
+
+
 def score_bin(c):
     """Log-scale bin: 4 bins per factor of 10, from 1e-7 (bin -28) up to 1 (bin 0)."""
     return F.floor(F.log10(F.greatest(F.col(c), F.lit(1e-7))) * 4).cast("int")
 
 
 def main():
-    metas = {m: json.loads(text(f"{ROOT}/{d.strip('/')}/meta.json")) for m, d in MODELS.items()}
-    boosters = {m: text(f"{ROOT}/{d.strip('/')}/stage1.txt") for m, d in MODELS.items()}
+    if os.environ.get("BQ2_WAIT_FOR_BQ1") == "1":
+        ok = bq1_finished()
+        if not ok:
+            raise SystemExit(f"[bq2-score] BQ1 has not finished {SRC} week {DATE_FROM} yet: not scoring "
+                             "(Step Functions retries later)")
+        print(f"[bq2-score] BQ1 finished this week ({ok})")
+    drop_missing_models()
+    metas = {m: json.loads(text(f"{model_path(d)}/meta.json")) for m, d in MODELS.items()}
+    boosters = {m: text(f"{model_path(d)}/stage1.txt") for m, d in MODELS.items()}
     thr = {m: float(metas[m]["threshold"]) for m in MODELS}
     feats = metas[next(iter(MODELS))]["stage1_features"]
     for m in MODELS:
@@ -97,12 +153,15 @@ def main():
                 out[f"score_{m}"] = bs[m].predict(x).astype("float32")
             yield out
 
-    txn = (in_dates(spark.read.parquet(f"{CURATED}/{metas[names[0]]['txn_table']}").filter(F.col("dataset") == DATASET))
+    txn = (in_dates(spark.read.parquet(f"{CURATED}/{metas[names[0]]['txn_table']}").filter(F.col("dataset") == SRC))
            .select("txn_id", "s_id", "r_id", "date", "week", "label", "pattern_label", *feats))
     schema = ("txn_id string, s_id long, r_id long, date date, week int, label int, pattern_label string, "
               + ", ".join(f"score_{m} float" for m in names))
     sc = txn.mapInPandas(score_part, schema).persist(DISK)
     n_pay = sc.count()
+    if n_pay == 0:
+        raise SystemExit(f"[bq2-score] no payments for {SRC} {DATE_FROM}..{DATE_TO} in {CURATED}: "
+                         "the features for this week are not built yet (BQ1 has not finished it)")
     print(f"[bq2-score] scored {n_pay} payments")
 
     # ---- flagged payments (any model) for scheme timing
@@ -116,7 +175,7 @@ def main():
     ad = (sc.select(F.col("s_id").alias("id"), "date", *[f"score_{m}" for m in names])
             .unionByName(sc.select(F.col("r_id").alias("id"), "date", *[f"score_{m}" for m in names]))
             .groupBy("id", "date").agg(*[F.max(f"score_{m}").alias(f"score_{m}") for m in names]))
-    acct = (in_dates(spark.read.parquet(f"{CURATED}/{metas[names[0]]['acct_table']}").filter(F.col("dataset") == DATASET))
+    acct = (in_dates(spark.read.parquet(f"{CURATED}/{metas[names[0]]['acct_table']}").filter(F.col("dataset") == SRC))
             .withColumn("id", F.xxhash64(F.col("acct_bank").cast("string"), "acct"))
             .select("id", "date", "week", "acct_bank", "acct", "label", "pattern_label"))
     adj = ad.join(acct, ["id", "date"], "inner")

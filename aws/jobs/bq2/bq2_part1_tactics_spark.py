@@ -69,7 +69,13 @@ SD_FLOOR = 0.005       # CUSUM: smallest sd used for a share
 DIMS = ["pattern", "format", "amount", "cross_ccy", "cross_bank", "hour"]
 # =========================================================================================
 
-CURATED, ANALYTICS = f"{ROOT}/curated", f"{ROOT}/analytics"
+# Input data can come from another root / dataset name than where BQ2 writes (e.g. BQ1's shared data):
+#   AML_DATA_ROOT=s3://<bucket>  (curated/ is read there; default AML_ROOT)
+#   AML_SRC_DATASET=HI-Large-live (the dataset partition read; default = the dataset argument, which still
+#                                  names everything BQ2 writes, so the dashboard and decisions keep "HI-Large")
+DATA_ROOT = os.environ.get("AML_DATA_ROOT", "").rstrip("/") or ROOT
+SRC = os.environ.get("AML_SRC_DATASET", "") or DATASET
+CURATED, ANALYTICS = f"{DATA_ROOT}/curated", f"{ROOT}/analytics"
 spark = SparkSession.builder.appName(f"BQ2Part1-{DATASET}").getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
 spark.conf.set("spark.sql.ansi.enabled", "false")
@@ -78,11 +84,16 @@ spark.conf.set("spark.sql.shuffle.partitions", os.environ.get("AML_SHUFFLE", "20
 
 
 def weekly_counts():
-    rd = lambda name: spark.read.parquet(f"{CURATED}/{name}").filter(F.col("dataset") == DATASET)
-    tx = rd("transactions").select("txn_id", "txn_time", "txn_date", "from_bank", "to_bank", "amount_paid",
+    rd = lambda name: spark.read.parquet(f"{CURATED}/{name}").filter(F.col("dataset") == SRC)
+    tx = rd("transactions").select("week", "txn_id", "txn_time", "txn_date", "from_bank", "to_bank", "amount_paid",
                                    "payment_currency", "payment_format", "is_cross_currency")
     if AS_OF:
         tx = tx.filter(F.col("txn_date") <= F.lit(AS_OF).cast("date"))
+        # transactions/ is partitioned by week number (HI-Large: week 1 = 2022-08-01): read only the weeks up to AS_OF
+        if os.environ.get("BQ2_WEEK1"):
+            from datetime import date
+            n = (date.fromisoformat(AS_OF) - date.fromisoformat(os.environ["BQ2_WEEK1"])).days // 7 + 1
+            tx = tx.filter(F.col("week").cast("int") <= n)
     lab = rd("labels").select("txn_id", F.col("is_laundering").cast("int").alias("label"))
     first = Window.partitionBy("txn_id").orderBy("txn_time", "scheme_id")
     sch = (rd("scheme_txns").filter("found_in_transactions")
