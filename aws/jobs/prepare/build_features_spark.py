@@ -158,18 +158,32 @@ def load_transactions():
     med_base = all_txns
     if OUTPUT_TO:
         med_base = med_base.filter(F.col("txn_date") <= F.lit(OUTPUT_TO).cast("date"))
-    med_paid = med_base.groupBy("payment_currency").agg(
-        F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
-    med_recv = med_base.groupBy("receiving_currency").agg(
-        F.expr("percentile_approx(amount_received, 0.5)").cast("double").alias("med_recv"))
+    # Both medians in ONE scan of the dataset (was two), collected to the driver (a few currencies),
+    # so the median sub-plan is not re-embedded in every later plan.
+    sides = med_base.select(F.explode(F.array(
+        F.struct(F.lit("paid").alias("side"), F.col("payment_currency").alias("ccy"),
+                 F.col("amount_paid").cast("double").alias("amt")),
+        F.struct(F.lit("recv").alias("side"), F.col("receiving_currency").alias("ccy"),
+                 F.col("amount_received").cast("double").alias("amt")))).alias("_s")).select("_s.*")
+    med = (sides.groupBy("side", "ccy")
+                .agg(F.expr("percentile_approx(amt, 0.5)").alias("med")).collect())
+    med_paid = spark.createDataFrame([(r["ccy"], r["med"]) for r in med if r["side"] == "paid"],
+                                     "payment_currency string, med_paid double")
+    med_recv = spark.createDataFrame([(r["ccy"], r["med"]) for r in med if r["side"] == "recv"],
+                                     "receiving_currency string, med_recv double")
     txns = all_txns
     if OUTPUT_FROM:
         start = F.date_sub(F.lit(OUTPUT_FROM).cast("date"), LOOKBACK_DAYS)
         txns = txns.filter(F.col("txn_date") >= start)
     if OUTPUT_TO:
         txns = txns.filter(F.col("txn_date") <= F.lit(OUTPUT_TO).cast("date"))
-    labels = (spark.read.parquet(f"{CURATED}/labels")
-                   .filter(F.col("dataset") == DATASET).select("txn_id", "is_laundering"))
+    labels = spark.read.parquet(f"{CURATED}/labels").filter(F.col("dataset") == DATASET)
+    if OUTPUT_FROM or OUTPUT_TO:
+        # A chunk only needs its own weeks' labels: prune label partitions by week instead of
+        # shuffling the whole dataset's labels into the join (grows with every week cleaned).
+        wk = txns.agg(F.min("week"), F.max("week")).first()
+        labels = labels.filter(F.col("week").between(wk[0], wk[1]))
+    labels = labels.select("txn_id", "is_laundering")
     t = txns.join(labels, "txn_id", "left")
 
     try:   # pattern type per payment; a payment in several schemes keeps the first scheme
@@ -193,7 +207,13 @@ def load_transactions():
              .withColumn("rel_paid", F.col("amount_paid").cast("double") / F.col("med_paid"))
              .withColumn("rel_recv", F.col("amount_received").cast("double") / F.col("med_recv"))
              .withColumn("src", node("from_bank", "from_account"))
-             .withColumn("dst", node("to_bank", "to_account")))
+             .withColumn("dst", node("to_bank", "to_account"))
+             # only the columns later steps read: main() caches this, and a cache keeps (and the
+             # scan reads) every column it is given
+             .select("txn_id", "src", "dst", "ts", "txn_date", "week", "night", "round_amt",
+                     "payment_format", "is_cross_currency", "is_self_transfer", "is_laundering",
+                     "pattern_type", "payment_currency", "receiving_currency",
+                     "amount_paid", "amount_received", "rel_paid", "rel_recv"))
 
 
 # =========================================================== account events + same-day stats
@@ -230,14 +250,17 @@ def account_events(t):
 def same_day_features(ev):
     is_in, is_out = F.col("dir") == "in", F.col("dir") == "out"
     other = F.col("self") == 0
+    # size(collect_set) = countDistinct (both skip nulls), but 4 countDistincts on different columns
+    # make Spark Expand every event row 5x before the shuffle; per account-day sets are small.
+    n_distinct = lambda c: F.size(F.collect_set(c))
     return (ev.groupBy("acct", "txn_date")
         .agg(F.max("week").alias("week"),
              F.sum(is_in.cast("int")).alias("n_in"),
              F.sum(is_out.cast("int")).alias("n_out"),
-             F.countDistinct(F.when(is_in & other, F.col("cp"))).alias("n_senders"),
-             F.countDistinct(F.when(is_out & other, F.col("cp"))).alias("n_receivers"),
-             F.countDistinct("payment_format").alias("n_formats"),
-             F.countDistinct("ccy").alias("n_currencies"),
+             n_distinct(F.when(is_in & other, F.col("cp"))).alias("n_senders"),
+             n_distinct(F.when(is_out & other, F.col("cp"))).alias("n_receivers"),
+             n_distinct("payment_format").alias("n_formats"),
+             n_distinct("ccy").alias("n_currencies"),
              F.sum("cross").alias("n_cross_ccy"),
              F.sum("self").alias("n_self"),
              F.avg("night").alias("night_share"),
@@ -267,9 +290,9 @@ def rolling_features(daily):
     daily = daily.withColumn("day_idx", F.datediff("date", F.lit("1970-01-01")))
     by_day = Window.partitionBy("acct").orderBy("day_idx")
     last = lambda k: by_day.rangeBetween(-(k - 1), 0)
-    for k in ROLLING_DAYS:
-        for c in ("n_in", "n_out", "n_senders", "n_receivers", "n_pass_24h"):
-            daily = daily.withColumn(f"{c}_{k}d", F.sum(c).over(last(k)))
+    # one select, not 15 chained withColumns (each one re-analyses the whole plan on the driver)
+    daily = daily.select("*", *[F.sum(c).over(last(k)).alias(f"{c}_{k}d") for k in ROLLING_DAYS
+                                for c in ("n_in", "n_out", "n_senders", "n_receivers", "n_pass_24h")])
     return (daily
         .withColumn("io_ratio", F.when(F.col("amt_in_rel") > 0, F.col("amt_out_rel") / F.col("amt_in_rel")))
         .withColumn("active_days_7d", F.count(F.lit(1)).over(last(7)))
@@ -388,11 +411,18 @@ def scatter_gather_features(small):
     hop_out = p.groupBy(F.col("S").alias("acct"), "date").agg(F.countDistinct("D").alias("hop2_out"))
     hop_in = p.groupBy(F.col("D").alias("acct"), "date").agg(F.countDistinct("S").alias("hop2_in"))
     through = (p.groupBy(F.col("M").alias("acct"), "date")
-                .agg(F.countDistinct(F.concat_ws(">", "S", "D")).alias("mid_paths")))
-    return (as_src.join(as_dst, ["acct", "date"], "full")
-                  .join(hop_out, ["acct", "date"], "full")
-                  .join(hop_in, ["acct", "date"], "full")
-                  .join(through, ["acct", "date"], "full"))
+                .agg(F.countDistinct("S", "D").alias("mid_paths")))     # pairs, no string building
+    # Each part has one row per (acct, date): union + one max-aggregate = the 4 full outer joins,
+    # with one shuffle instead of four sort-merge joins.
+    cols = ["sg_src_max", "sg_dst_max", "hop2_out", "hop2_in", "mid_paths"]
+    out = as_src
+    for part in (as_dst, hop_out, hop_in, through):
+        out = out.unionByName(part, allowMissingColumns=True)
+    out = out.groupBy("acct", "date").agg(*[F.max(c).alias(c) for c in cols])
+    try:
+        return materialise(out, "scatter_gather")
+    finally:
+        paths.unpersist()
 
 
 def cycle_features(small):
@@ -405,11 +435,15 @@ def cycle_features(small):
                  F.col("ts").alias("first_ts"), F.col("ts").alias("last_ts"),
                  F.array("src", "dst").alias("nodes"), F.array("txn_id").alias("txns"))
     loops = None
+    cached = [E]
     for hops in range(2, CYCLE_MAX_HOPS + 1):
         j = P.alias("p").join(E.alias("e"),
                               (F.col("p.cur") == F.col("e.src"))
                               & (F.col("e.ts") >= F.col("p.last_ts"))
                               & (F.col("e.ts") <= F.col("p.first_ts") + W))
+        if hops < CYCLE_MAX_HOPS:      # read twice (loops closed now + paths extended): join once
+            j = j.persist(DISK)
+            cached.append(j)
         closed = (j.filter(F.col("e.dst") == F.col("p.start"))
                    .select(F.col("p.nodes").alias("nodes"), F.col("e.ts").alias("close_ts"),
                            F.concat("p.txns", F.array("e.txn_id")).alias("txns")))
@@ -433,8 +467,13 @@ def cycle_features(small):
     loops = (loops.withColumn("date", F.to_date(F.from_unixtime("close_ts")))
                   .withColumn("_key", F.concat_ws(",", F.array_sort("nodes")))
                   .dropDuplicates(["_key", "date"]))
-    return (loops.select(F.explode("nodes").alias("acct"), "date")
-                 .groupBy("acct", "date").agg(F.count(F.lit(1)).alias("cycles_today")))
+    out = (loops.select(F.explode("nodes").alias("acct"), "date")
+                .groupBy("acct", "date").agg(F.count(F.lit(1)).alias("cycles_today")))
+    try:
+        return materialise(out, "cycles")
+    finally:
+        for df in cached:
+            df.unpersist()
 
 
 def one_hop_features(ev, daily):
@@ -498,6 +537,13 @@ def main():
     feats = rolling_features(daily)
     feats = feats.join(materialise(one_hop_features(ev, daily), "one_hop"), ["acct", "date"], "left")
     feats = materialise(feats, "rolling+one_hop")
+    # Fill the edges cache while t is still cached, then free t / ev / daily: the checkpoint above
+    # cut feats' lineage, so nothing reads them again, and the fan / multi-hop steps get the memory.
+    spark.sparkContext.setJobDescription("v2 edges")
+    edges.count()
+    spark.sparkContext.setJobDescription(None)
+    for df in (t, ev, daily):
+        df.unpersist()
 
     fan_cols = []
     for w in (WINDOWS_DAYS if fan_windows_needed() else []):
@@ -525,18 +571,23 @@ def main():
     graph_cols = []
     if USE_SCATTER_GATHER or USE_CYCLES:
         small = non_hub_edges(edges).persist(DISK)
+        spark.sparkContext.setJobDescription("v2 non-hub edges")
+        small.count()                  # fill small's cache, then edges is no longer read
+        spark.sparkContext.setJobDescription(None)
+        edges.unpersist()
         if USE_SCATTER_GATHER:
-            sg = materialise(scatter_gather_features(since(small, 2 * SG_WINDOW_DAYS)), "scatter_gather")
+            sg = scatter_gather_features(since(small, 2 * SG_WINDOW_DAYS))   # materialised inside
             feats = feats.join(sg, ["acct", "date"], "left")
             graph_cols += ["sg_src_max", "sg_dst_max", "hop2_out", "hop2_in", "mid_paths"]
         if USE_CYCLES:
-            cyc = materialise(cycle_features(since(small, CYCLE_WINDOW_DAYS + 6)), "cycles")
+            cyc = cycle_features(since(small, CYCLE_WINDOW_DAYS + 6))        # materialised inside
             feats = feats.join(cyc, ["acct", "date"], "left")
             feats = feats.fillna(0, subset=["cycles_today"])
             last7 = (Window.partitionBy("acct").orderBy(F.datediff("date", F.lit("1970-01-01")))
                            .rangeBetween(-6, 0))
             feats = feats.withColumn("cycles_7d", F.sum("cycles_today").over(last7))
             graph_cols += ["cycles_today", "cycles_7d"]
+        small.unpersist()
 
     feature_cols = (
         ["n_in", "n_out", "n_senders", "n_receivers", "n_formats", "n_currencies", "n_cross_ccy",
@@ -571,9 +622,11 @@ def main():
     rebalance(sample, "dataset", "week").write.mode("overwrite") \
           .partitionBy("dataset", "week").parquet(f"{CURATED}/{FEATURES_TABLE}_sample")
 
-    by_label = {r["label"]: r["count"] for r in features.groupBy("label").count().collect()}
-    by_pattern = {r["pattern_label"]: r["count"] for r in
-                  features.filter("label = 1").groupBy("pattern_label").count().collect()}
+    by_label, by_pattern = {}, {}      # one pass over features for both summaries (was two)
+    for r in features.groupBy("label", "pattern_label").count().collect():
+        by_label[r["label"]] = by_label.get(r["label"], 0) + r["count"]
+        if r["label"] == 1:
+            by_pattern[r["pattern_label"]] = r["count"]
     chunk = f" {OUTPUT_FROM or 'start'} to {OUTPUT_TO or 'end'}" if (OUTPUT_FROM or OUTPUT_TO) else ""
     print(f"[features] {DATASET}{chunk}: account-days by label {by_label}")
     print(f"[features] laundering account-days by pattern: {dict(sorted(by_pattern.items()))}")

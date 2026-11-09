@@ -32,11 +32,45 @@ Input `{"dataset": "HI-Large-live", "week": "2022-09-12"}` (one weekly file) or
 `{"dataset": "HI-Medium"}` / `{"dataset": "SAML-R"}` (whole dataset). Options: `features` (default
 true; false = clean only), `force`, `force_features`, `convert` (SAML: redo the conversion),
 `check_previous` (week mode: the previous week must be cleaned, for the 21-day look-back), `emit`
-(publish `DataPrepared` when done), `app_id`, `code_prefix`.
+(publish `DataPrepared` when done), `app_id`, `code_prefix`, `feature_version`.
 
 Progress marker: `s3://is459-g1t4-aml/progress/prepare/<dataset>/<week|full>.json`. A finished
-dataset or week returns at once, so BQ1 and BQ2 can both ask for it. A run that crashed is noticed
-(the marker's execution is no longer running) and redone.
+dataset or week returns at once when its feature version matches the requested version.
+Interrupted runs preserve completed feature stages and resume from the first unfinished one.
+An execution known to be running blocks a second caller, including a forced call. If its status
+cannot be checked, the lookup is retried and the caller fails without changing the marker.
+The S3 marker check is still not an atomic lock: simultaneous first callers can race.
+
+Feature releases use one version for V2, transaction features, and V3. The default is
+`2026-11-09.3`, set in `Setup.Assign.feature_version` in `aml_prepare.asl.json`. When any feature
+builder changes, upload the updated scripts and `jobs.zip`, bump that default, and deploy the
+state machine. All existing callers then use the new default. Editing Python alone does not
+invalidate completion markers. The version is a completion label, not a code selector; the
+S3 entry scripts and `jobs.zip` must contain the intended code.
+
+- A missing or different marker version resets all feature flags and rebuilds
+  `FeaturesV2 -> FeaturesTxn -> FeaturesV3`, preserving completed cleaning. Legacy markers
+  without a version therefore trigger one feature rebuild when features are next requested.
+- The same version retains saved checkpoints. For example, a V3 failure resumes at V3.
+- `force_features: true` resets all feature flags for the requested version.
+- `force: true` resets cleaning and feature progress. A failure records only progress from
+  that rebuild, rather than inheriting completion flags from an older successful run.
+- `features: false` preserves the actual saved feature version; a forced clean clears it.
+
+A direct preparation call can override the default, for example:
+
+```json
+{"dataset": "HI-Medium", "feature_version": "2026-11-09.4"}
+```
+
+Use that same override when resuming the run. For normal pipeline releases, bump the default
+instead so nested BQ1/BQ2 callers request the same version. Output table names remain unchanged;
+different versions are not stored as separate feature tables.
+
+Local workflow regression checks evaluate the actual JSONata expressions with simulated service
+responses (no AWS calls): install `pytest` and `jsonata-python==0.7.1`, then run
+`python -m pytest tests/test_aml_prepare.py`. Validate the definition with AWS before deployment;
+local checks do not replace an EMR integration run.
 
 Sizing (tested on HI-Medium, 8 Nov 2026):
 

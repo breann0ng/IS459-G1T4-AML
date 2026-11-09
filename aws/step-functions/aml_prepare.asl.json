@@ -1,5 +1,5 @@
 {
-  "Comment": "AML shared data stage, used by BQ1 (training + weekly scoring) and BQ2. One dataset, either whole (training sets) or one week (a weekly bank file): clean, then (when features are wanted) parse patterns -> features (features_v2, txn_features, features_v3 in one job). Idempotent: a marker in s3://is459-g1t4-aml/progress/prepare/<dataset>/<week|full>.json records what is done, so a second caller (BQ1 and BQ2 both asking for the same week) returns at once. Input: {\"dataset\": \"HI-Large-live\", \"week\": \"2022-09-12\"} or {\"dataset\": \"HI-Small\"} (whole file). Optional: features (default true; false = clean only, for history weeks), force, check_previous (default true in week mode), emit (default false: publish a DataPrepared event for BQ1/BQ2 when done), app_id, code_prefix. Also accepts an EventBridge S3 'Object Created' event for raw/transactions/set=<dataset>/week=<Monday>/_SUCCESS. SAML: {\"dataset\": \"SAML-R\"} or \"SAML-C\" (whole only); SAML-D is converted to the IBM layout first when raw/ has none yet (convert: true forces it; one conversion writes both).",
+  "Comment": "AML shared data stage, used by BQ1 (training + weekly scoring) and BQ2. One dataset, either whole (training sets) or one week (a weekly bank file): clean, then (when features are wanted) parse patterns -> features (features_v2 -> txn_features -> features_v3 in separate jobs). Idempotent: a marker in s3://is459-g1t4-aml/progress/prepare/<dataset>/<week|full>.json records what is done, so a second caller (BQ1 and BQ2 both asking for the same week) returns at once. Input: {\"dataset\": \"HI-Large-live\", \"week\": \"2022-09-12\"} or {\"dataset\": \"HI-Small\"} (whole file). Feature completion is scoped to feature_version (default set in Setup); missing or changed versions rebuild features without re-cleaning. Optional: feature_version, features (default true; false = clean only, for history weeks), force, check_previous (default true in week mode), emit (default false: publish a DataPrepared event for BQ1/BQ2 when done), app_id, code_prefix. Also accepts an EventBridge S3 'Object Created' event for raw/transactions/set=<dataset>/week=<Monday>/_SUCCESS. SAML: {\"dataset\": \"SAML-R\"} or \"SAML-C\" (whole only); SAML-D is converted to the IBM layout first when raw/ has none yet (convert: true forces it; one conversion writes both).",
   "QueryLanguage": "JSONata",
   "StartAt": "ParseInput",
   "States": {
@@ -7,7 +7,7 @@
       "Type": "Pass",
       "Comment": "Input by hand / from BQ1, or an S3 event (the key gives dataset and week; S3 events emit).",
       "Assign": {
-        "in": "{% $exists($states.input.detail.object.key) ? ( $k := $states.input.detail.object.key; {'dataset': $match($k, /set=([^\\/]+)/).groups[0], 'week': $match($k, /week=([0-9-]+)/).groups[0], 'emit': true, 'code_prefix': $states.input.code_prefix, 'app_id': $states.input.app_id} ) : $states.input %}"
+        "in": "{% $exists($states.input.detail.object.key) ? ( $k := $states.input.detail.object.key; {'dataset': $match($k, /set=([^\\/]+)/).groups[0], 'week': $match($k, /week=([0-9-]+)/).groups[0], 'emit': true, 'code_prefix': $states.input.code_prefix, 'app_id': $states.input.app_id, 'feature_version': $states.input.feature_version} ) : $states.input %}"
       },
       "Next": "Setup"
     },
@@ -34,14 +34,17 @@
         "checked": false,
         "v2_profile": "{% $exists($in.v2_profile) ? $in.v2_profile = true : false %}",
         "convert": "{% $exists($in.convert) ? $in.convert : false %}",
-        "is_saml": "{% $exists($in.dataset) ? $substring($in.dataset, 0, 5) = 'SAML-' : false %}"
+        "is_saml": "{% $exists($in.dataset) ? $substring($in.dataset, 0, 5) = 'SAML-' : false %}",
+        "feature_version": "{% $exists($in.feature_version) ? $in.feature_version : '2026-11-09.3' %}",
+        "normalised": false
       },
-      "Next": "Plan"
+      "Next": "Plan",
+      "Comment": "Bump the default feature_version whenever any feature builder changes; callers may explicitly request a version."
     },
     "Plan": {
       "Type": "Pass",
       "Assign": {
-        "problems": "{% [ $not(($dataset != null)) ? 'dataset is missing', (($week != null) and $fromMillis($toMillis($week & 'T00:00:00Z'), '[F1]') != '1') ? 'week must be a Monday: ' & $week, ($is_saml and $not($dataset in ['SAML-R', 'SAML-C'])) ? 'SAML datasets are SAML-R (ramp) or SAML-C (control): ' & $dataset, ($is_saml and $week != null) ? 'SAML datasets are prepared whole (no week)' ] %}",
+        "problems": "{% [ ($type($feature_version) = 'string' ? $length($trim($feature_version)) = 0 : true) ? 'feature_version must be a non-empty string', $not(($dataset != null)) ? 'dataset is missing', (($week != null) and $fromMillis($toMillis($week & 'T00:00:00Z'), '[F1]') != '1') ? 'week must be a Monday: ' & $week, ($is_saml and $not($dataset in ['SAML-R', 'SAML-C'])) ? 'SAML datasets are SAML-R (ramp) or SAML-C (control): ' & $dataset, ($is_saml and $week != null) ? 'SAML datasets are prepared whole (no week)' ] %}",
         "spark": "{% '--py-files s3://is459-g1t4-aml/' & $code & '/jobs.zip --conf spark.archives=s3://is459-g1t4-aml/jobs/venv.tar.gz#environment --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python --conf spark.emr-serverless.driverEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.executorEnv.AML_ROOT=s3://is459-g1t4-aml --conf spark.emr-serverless.driverEnv.AWS_REGION=us-east-1 --conf spark.executorEnv.AWS_REGION=us-east-1 --conf spark.driver.cores=4 --conf spark.driver.memory=16g --conf spark.driver.memoryOverhead=4g --conf spark.driver.maxResultSize=2g --conf spark.executor.cores=4 --conf spark.executor.memory=10g --conf spark.executor.memoryOverhead=4g --conf spark.emr-serverless.executor.disk=100g --conf spark.dynamicAllocation.maxExecutors=3 --conf spark.sql.autoBroadcastJoinThreshold=-1' %}"
       },
       "Next": "ValidInput?"
@@ -86,7 +89,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "LogFailure",
+          "Next": "Failed",
           "Assign": {
             "failed_step": "done",
             "error": "{% $states.errorOutput %}"
@@ -97,15 +100,19 @@
     },
     "AlreadyDone?": {
       "Type": "Choice",
-      "Comment": "Skip what is done (unless force). Cleaned before but features now wanted -> features only.",
+      "Comment": "Check active execution first, then reconcile feature version/force flags before skipping or resuming work. Force never bypasses an execution known to be running.",
       "Choices": [
         {
-          "Condition": "{% $done.status = 'RUNNING' and $not($force) and $not($checked) %}",
+          "Condition": "{% $done.status = 'RUNNING' and $not($checked) %}",
           "Next": "StillRunning"
         },
         {
-          "Condition": "{% $done.status = 'RUNNING' and $not($force) %}",
+          "Condition": "{% $done.status = 'RUNNING' %}",
           "Next": "InProgress"
+        },
+        {
+          "Condition": "{% $not($normalised) %}",
+          "Next": "ReconcileProgress"
         },
         {
           "Condition": "{% $done.cleaned = true and ($done.features = true or $not($features)) and $not($force) and $not($features and $force_features) %}",
@@ -138,14 +145,24 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "AlreadyDone?",
+          "Next": "Failed",
           "Assign": {
-            "checked": true,
-            "done": "{% $merge([$done, {'status': 'STALE'}]) %}"
+            "failed_step": "StillRunning",
+            "error": "{% $states.errorOutput %}"
           }
         }
       ],
-      "Next": "AlreadyDone?"
+      "Next": "AlreadyDone?",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ]
     },
     "InProgress": {
       "Type": "Fail",
@@ -177,7 +194,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "LogFailure",
+          "Next": "Failed",
           "Assign": {
             "failed_step": "prev",
             "error": "{% $states.errorOutput %}"
@@ -208,7 +225,7 @@
         "Bucket": "is459-g1t4-aml",
         "Key": "{% $marker_key %}",
         "ContentType": "application/json",
-        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': false, 'features': false} %}"
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'feature_version': $done.feature_version, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': false, 'features': false, 'v2_done': false, 'txn_done': false} %}"
       },
       "Next": "Saml?",
       "Catch": [
@@ -221,7 +238,10 @@
             "error": "{% $states.errorOutput %}"
           }
         }
-      ]
+      ],
+      "Assign": {
+        "done": "{% $merge([$done, {'cleaned': false, 'features': false, 'v2_done': false, 'txn_done': false}]) %}"
+      }
     },
     "LogStartFeatures": {
       "Type": "Task",
@@ -230,7 +250,7 @@
         "Bucket": "is459-g1t4-aml",
         "Key": "{% $marker_key %}",
         "ContentType": "application/json",
-        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': true, 'features': false} %}"
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'feature_version': $done.feature_version, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': true, 'features': false, 'v2_done': $done.v2_done = true, 'txn_done': $done.txn_done = true} %}"
       },
       "Next": "ParsePatterns",
       "Catch": [
@@ -282,7 +302,8 @@
         }
       ],
       "Assign": {
-        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'Clean', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}"
+        "steps": "{% $append($steps, [( $j := $exists($states.result.JobRun) ? $states.result.JobRun : $states.result; {'step': 'Clean', 'job_run_id': $j.JobRunId, 'state': $j.State, 'started': $states.context.State.EnteredTime, 'ended': $now(), 'seconds': $j.TotalExecutionDurationSeconds, 'billed': $j.BilledResourceUtilization} )]) %}",
+        "done": "{% $merge([$done, {'cleaned': true, 'features': false, 'v2_done': false, 'txn_done': false}]) %}"
       },
       "Catch": [
         {
@@ -303,7 +324,7 @@
       "Choices": [
         {
           "Condition": "{% $features %}",
-          "Next": "ParsePatterns"
+          "Next": "LogStartFeatures"
         }
       ],
       "Default": "LogSuccess"
@@ -436,7 +457,7 @@
         "Bucket": "is459-g1t4-aml",
         "Key": "{% $marker_key %}",
         "ContentType": "application/json",
-        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': true, 'features': false, 'v2_done': true, 'txn_done': false, 'steps': $steps} %}"
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'feature_version': $done.feature_version, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': true, 'features': false, 'v2_done': true, 'txn_done': false, 'steps': $steps} %}"
       },
       "Next": "FeaturesTxn",
       "Catch": [
@@ -451,7 +472,7 @@
         }
       ],
       "Assign": {
-        "done": "{% $merge([$done ? $done : {}, {'cleaned': true, 'v2_done': true}]) %}"
+        "done": "{% $merge([$done, {'cleaned': true, 'features': false, 'v2_done': true, 'txn_done': false}]) %}"
       }
     },
     "FeaturesTxn": {
@@ -514,7 +535,7 @@
         "Bucket": "is459-g1t4-aml",
         "Key": "{% $marker_key %}",
         "ContentType": "application/json",
-        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': true, 'features': false, 'v2_done': true, 'txn_done': true, 'steps': $steps} %}"
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'feature_version': $done.feature_version, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'RUNNING', 'cleaned': true, 'features': false, 'v2_done': true, 'txn_done': true, 'steps': $steps} %}"
       },
       "Next": "FeaturesV3",
       "Catch": [
@@ -529,7 +550,7 @@
         }
       ],
       "Assign": {
-        "done": "{% $merge([$done ? $done : {}, {'cleaned': true, 'v2_done': true, 'txn_done': true}]) %}"
+        "done": "{% $merge([$done, {'cleaned': true, 'features': false, 'v2_done': true, 'txn_done': true}]) %}"
       }
     },
     "FeaturesV3": {
@@ -592,7 +613,7 @@
         "Bucket": "is459-g1t4-aml",
         "Key": "{% $marker_key %}",
         "ContentType": "application/json",
-        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'SUCCEEDED', 'cleaned': true, 'features': $features or ($done.features = true), 'steps': $steps, 'finished_at': $now()} %}"
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'feature_version': $done.feature_version, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'SUCCEEDED', 'cleaned': true, 'features': $features or ($done.features = true), 'v2_done': $features or ($done.v2_done = true), 'txn_done': $features or ($done.txn_done = true), 'steps': $steps, 'finished_at': $now()} %}"
       },
       "Next": "Emit?",
       "Catch": [
@@ -607,7 +628,7 @@
         }
       ],
       "Assign": {
-        "done": "{% {'cleaned': true, 'features': $features or ($done.features = true)} %}"
+        "done": "{% $merge([$done, {'cleaned': true, 'features': $features or ($done.features = true), 'v2_done': $features or ($done.v2_done = true), 'txn_done': $features or ($done.txn_done = true)}]) %}"
       }
     },
     "Emit?": {
@@ -630,7 +651,7 @@
             "EventBusName": "default",
             "Source": "aml.prepare",
             "DetailType": "DataPrepared",
-            "Detail": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features': $done.features = true, 'code_prefix': $code, 'app_id': $app_id} %}"
+            "Detail": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features': $done.features = true, 'feature_version': $done.feature_version, 'code_prefix': $code, 'app_id': $app_id} %}"
           }
         ]
       },
@@ -638,7 +659,7 @@
     },
     "Done": {
       "Type": "Pass",
-      "Output": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'cleaned': true, 'features': $done.features = true, 'steps': $steps} %}",
+      "Output": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'cleaned': true, 'features': $done.features = true, 'feature_version': $done.feature_version, 'steps': $steps} %}",
       "End": true
     },
     "LogFailure": {
@@ -648,7 +669,7 @@
         "Bucket": "is459-g1t4-aml",
         "Key": "{% $marker_key %}",
         "ContentType": "application/json",
-        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'FAILED', 'cleaned': $failed_step in ['ParsePatterns', 'FeaturesV2', 'FeaturesTxn', 'FeaturesV3'] or $done.cleaned = true, 'v2_done': $done.v2_done = true, 'txn_done': $done.txn_done = true, 'features': $done.features = true, 'failed_step': $failed_step, 'error': $error, 'steps': $steps, 'finished_at': $now()} %}"
+        "Body": "{% {'dataset': $dataset, 'week': $week, 'week_end': $week_end, 'features_requested': $features, 'feature_version': $done.feature_version, 'execution': $states.context.Execution.Id, 'started_at': $states.context.Execution.StartTime, 'status': 'FAILED', 'cleaned': $done.cleaned = true, 'v2_done': $done.v2_done = true, 'txn_done': $done.txn_done = true, 'features': $done.features = true, 'failed_step': $failed_step, 'error': $error, 'steps': $steps, 'finished_at': $now()} %}"
       },
       "Next": "Failed",
       "Catch": [
@@ -769,6 +790,15 @@
         }
       ],
       "Next": "Clean"
+    },
+    "ReconcileProgress": {
+      "Type": "Pass",
+      "Comment": "Preserve cleaning and same-version checkpoints. A full force resets all progress; a requested feature rebuild or version mismatch resets every dependent feature stage. Clean-only calls preserve the actual feature version.",
+      "Assign": {
+        "normalised": true,
+        "done": "{% ( $old := $done ? $done : {}; $reset := $force or ($features and ($force_features or $old.feature_version != $feature_version or $not($exists($old.feature_version)))); $merge([$old, {'cleaned': $not($force) and $old.cleaned = true, 'features': $not($reset) and $old.features = true, 'v2_done': $not($reset) and ($old.v2_done = true or $old.features = true), 'txn_done': $not($reset) and ($old.txn_done = true or $old.features = true), 'feature_version': $features ? $feature_version : ($force ? null : ($exists($old.feature_version) ? $old.feature_version : null))}]) ) %}"
+      },
+      "Next": "AlreadyDone?"
     }
   }
 }

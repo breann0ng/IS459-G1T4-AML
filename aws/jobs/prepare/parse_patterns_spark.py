@@ -11,7 +11,14 @@ Reads
 Writes (Parquet, partitioned by dataset; re-running a dataset replaces it)
     curated/schemes/        one row per laundering scheme: type, size, start, end, duration
     curated/scheme_txns/    one row per scheme payment: scheme_id, pattern_type, txn_id
-    curated/patterns_dq/    how many scheme payments were found in the clean data
+    curated/patterns_dq/    how many scheme payments were found in the clean data (+ the weeks linked)
+
+Linking is incremental: a run reads only the transaction weeks the previous run did not link (new
+weeks, plus its last week again, which a daily run may have grown) and keeps the previous run's
+matches for the rest. The answer key is fixed while transactions grow week by week, so a weekly run
+no longer re-reads every week. Same result as linking everything again; it falls back to that when
+there is no previous run, the patterns file changed, or a linked week has gone.
+AML_PATTERNS_FULL=1 forces a full link (e.g. after re-cleaning an old week from a different file).
 
 The file is blocks like:
     BEGIN LAUNDERING ATTEMPT - FAN-OUT:  Max 16-degree Fan-Out
@@ -28,7 +35,7 @@ import re
 import sys
 from datetime import datetime, timezone
 
-from pyspark.sql import SparkSession, Window
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 
@@ -36,6 +43,7 @@ from pyspark.sql import functions as F
 ROOT = os.environ["AML_ROOT"]      # s3://<bucket>; no default, so a job never writes to the wrong bucket
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "HI-Small"
+FULL_RELINK = os.environ.get("AML_PATTERNS_FULL", "") == "1"   # 1 = link against every week again
 # =========================================================================================
 
 PATTERNS_PATH = f"{ROOT}/raw/patterns/set={DATASET}/*Patterns*.txt"
@@ -86,7 +94,53 @@ def txn_id_col():
         F.col("payment_format")), 256)
 
 
+def first_matches(p, txns):
+    """Each scheme payment id's clean id. Cleaning may suffix an id with -2/-3, so `txns` carries the
+    part before "-" as txn_id; the smallest clean id wins (with its week). The scheme ids are small,
+    so they are broadcast (no big shuffle)."""
+    best = F.min(F.struct("clean_txn_id", "week")).alias("_m")
+    return (txns.join(F.broadcast(p.select("txn_id").distinct()), "txn_id")
+                .groupBy("txn_id").agg(best).select("txn_id", "_m.clean_txn_id", "_m.week"))
+
+
+def scheme_account_counts(p):
+    acct = lambda b, a: F.concat_ws("|", F.col(b).cast("string"), F.col(a))
+    return (p.select("scheme_id", acct("from_bank", "from_account").alias("a"))
+             .unionByName(p.select("scheme_id", acct("to_bank", "to_account").alias("a")))
+             .groupBy("scheme_id").agg(F.countDistinct("a").alias("n_accounts")))
+
+
+def week_folders():
+    """This dataset's cleaned weeks, from the file listing of curated/transactions (no data read)."""
+    rx = re.compile(rf"/dataset={re.escape(DATASET)}/week=(\d+)/")
+    files = spark.read.parquet(f"{OUT}/transactions").inputFiles()
+    return sorted({int(m.group(1)) for m in map(rx.search, files) if m})
+
+
+def previous_link(n_lines, n_schemes):
+    """Weeks the previous run linked, if it parsed the same answer key; else None (link everything)."""
+    if FULL_RELINK:
+        return None
+    try:
+        r = spark.read.parquet(f"{OUT}/patterns_dq/dataset={DATASET}").first()
+    except Exception:                                   # no previous run
+        return None
+    r = r.asDict() if r else {}
+    if not r.get("weeks_linked") or (r["n_scheme_txns"], r["n_schemes"]) != (n_lines, n_schemes):
+        return None
+    return {int(w) for w in r["weeks_linked"].split(",")}
+
+
 def main():
+    caches = []
+    try:
+        build_outputs(caches)
+    finally:
+        for cached in reversed(caches):
+            cached.unpersist()
+
+
+def build_outputs(caches):
     schema = ("scheme_seq int, pattern_type string, pattern_detail string, line_no int, "
               + ", ".join(f"{c} string" for c in RAW_COLS))
     rows = spark.sparkContext.wholeTextFiles(PATTERNS_PATH).flatMap(parse_file)
@@ -101,19 +155,32 @@ def main():
          .withColumn("amount_received", F.col("amount_received_raw").cast(AMOUNT_TYPE))
          .withColumn("amount_paid", F.col("amount_paid_raw").cast(AMOUNT_TYPE)))
     p = p.withColumn("txn_id", txn_id_col()).cache()
+    caches.append(p)
     n_lines = p.count()
     if n_lines == 0:
         raise SystemExit(f"No scheme payments found at {PATTERNS_PATH}")
+    n_schemes = p.agg(F.countDistinct("scheme_id")).first()[0]
 
-    # ---- link to clean transactions. Cleaning may suffix an id with -2/-3, so match on the
-    # part before "-". The scheme ids are small, so they are broadcast (no big shuffle).
-    txns = (spark.read.parquet(f"{OUT}/transactions")
-                 .filter(F.col("dataset") == DATASET)
-                 .select(F.split("txn_id", "-").getItem(0).alias("txn_id"),
-                         F.col("txn_id").alias("clean_txn_id"), "week"))
-    matched = txns.join(F.broadcast(p.select("txn_id").distinct()), "txn_id")
-    first = Window.partitionBy("txn_id").orderBy("clean_txn_id")
-    matched = matched.withColumn("_n", F.row_number().over(first)).filter("_n = 1").drop("_n")
+    # ---- link to clean transactions (txn_id = the part before "-", see first_matches)
+    split_id = lambda df: df.select(F.split("txn_id", "-").getItem(0).alias("txn_id"),
+                                    F.col("txn_id").alias("clean_txn_id"), "week")
+    txns = split_id(spark.read.parquet(f"{OUT}/transactions").filter(F.col("dataset") == DATASET))
+    weeks = week_folders()
+    prev = previous_link(n_lines, n_schemes) if weeks else None
+    if prev and prev <= set(weeks):
+        # Re-read only weeks the previous run did not link, plus its last week (a daily run grows the
+        # current week); keep its matches for the other weeks. The smallest clean id over (kept
+        # matches + re-read weeks) is the smallest over every week, so the result is unchanged.
+        redo = sorted(w for w in weeks if w not in prev or w >= max(prev))
+        kept = (spark.read.parquet(f"{OUT}/scheme_txns/dataset={DATASET}")
+                     .filter(F.col("found_in_transactions") & ~F.col("week").isin(redo)))
+        candidates = split_id(kept).unionByName(txns.filter(F.col("week").isin(redo)))
+        print(f"[patterns] incremental link: weeks {redo} read, {len(weeks) - len(redo)} kept from the last run")
+    else:
+        candidates = txns
+        print(f"[patterns] full link: {len(weeks) or 'all'} weeks read")
+    # Computed now (small): the writes below replace scheme_txns, which `kept` reads.
+    matched = first_matches(p, candidates).localCheckpoint(eager=True)
     linked = (p.join(matched, "txn_id", "left")
                .withColumn("found_in_transactions", F.col("clean_txn_id").isNotNull()))
 
@@ -125,10 +192,7 @@ def main():
         "amount_paid", "payment_currency", "amount_received", "receiving_currency",
         "payment_format", "week", "found_in_transactions", "line_no")
 
-    acct = lambda b, a: F.concat_ws("|", F.col(b).cast("string"), F.col(a))
-    accounts = (p.select("scheme_id", acct("from_bank", "from_account").alias("a"))
-                 .unionByName(p.select("scheme_id", acct("to_bank", "to_account").alias("a")))
-                 .groupBy("scheme_id").agg(F.countDistinct("a").alias("n_accounts")))
+    accounts = scheme_account_counts(p)
     schemes = (linked.groupBy("dataset", "scheme_id", "pattern_type", "pattern_detail")
         .agg(F.count(F.lit(1)).alias("n_txns"),
              F.sum(F.col("found_in_transactions").cast("int")).alias("n_txns_found"),
@@ -144,9 +208,9 @@ def main():
     by_type = {r["pattern_type"]: r["count"] for r in schemes.groupBy("pattern_type").count().collect()}
     patterns_dq = spark.createDataFrame(
         [(DATASET, schemes.count(), n_lines, n_found, n_found / n_lines,
-          str(dict(sorted(by_type.items()))), RUN_AT)],
+          str(dict(sorted(by_type.items()))), RUN_AT, ",".join(map(str, weeks)))],
         "dataset string, n_schemes long, n_scheme_txns long, n_found long, "
-        "match_rate double, schemes_by_type string, run_at string")
+        "match_rate double, schemes_by_type string, run_at string, weeks_linked string")
 
     schemes.coalesce(1).write.mode("overwrite").partitionBy("dataset").parquet(f"{OUT}/schemes")
     (scheme_txns.coalesce(1).sortWithinPartitions("scheme_id", "line_no")
