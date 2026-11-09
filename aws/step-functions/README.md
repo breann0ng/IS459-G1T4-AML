@@ -11,7 +11,7 @@ and EMR apps written in. Edit the JSON here, then redeploy it with the command a
 | `aml_bq1_score.asl.json` | `aml_bq1_score` | **Live**, identical to AWS. Tested end to end on HI-Large-live 2022-09-26 (9 Nov): score 10.5 min, name 4 min, check + summary 3.5 min |
 | `aml_bq2_weekly.asl.json` | `aml_bq2_weekly` | **Not deployed yet.** Same as AWS except the 9 feature states are replaced by one `PrepareData` call to `aml_prepare`. Needs `iam/aml_sfn_bq2_prepare_policy.json` on role `aml-sfn-bq2` first |
 | `aml_bq2_weekly_ibm.asl.json` | `aml_bq2_weekly_ibm` | **Not deployed yet.** Same as AWS except the code path is the shared `jobs/` instead of the `bq2_ibm/jobs/` copy |
-| `legacy/aml_bq1_weekly.asl.json` | `aml_bq1_weekly` | Live and managed by Terraform (`aws/infra/orchestration.tf`), but no longer started: its S3 rule `aml-bq1-weekly-file` is disabled. Replaced by `aml_prepare` + `aml_bq1_score` (rules below) |
+| `legacy/aml_bq1_weekly.asl.json` | `aml_bq1_weekly` | Retired: no longer in `aws/infra/orchestration.tf`, so the next `terraform apply` deletes it and its disabled rule `aml-bq1-weekly-file`. Replaced by `aml_prepare` + `aml_bq1_score` (rules below), which Terraform now manages |
 
 Both "not deployed" files pass `ValidateStateMachineDefinition`. Neither has been run. Deploy them
 together with the BQ2 team and test `aml_bq2_weekly` on one SAML week first.
@@ -43,7 +43,7 @@ aws events put-rule --name aml-prepare-weekly-file --event-pattern file://aws/st
 aws events put-targets --rule aml-prepare-weekly-file --targets file://aws/step-functions/inputs/eventbridge/targets_weekly_file.json
 aws events put-rule --name aml-bq1-data-prepared --event-pattern file://aws/step-functions/inputs/eventbridge/rule_data_prepared.json
 aws events put-targets --rule aml-bq1-data-prepared --targets file://aws/step-functions/inputs/eventbridge/targets_data_prepared.json
-aws events disable-rule --name aml-bq1-weekly-file          # the legacy rule (Terraform): or remove it there
+aws events disable-rule --name aml-bq1-weekly-file          # the legacy rule: deleted by the next terraform apply
 ```
 
 ## Redeploy one machine

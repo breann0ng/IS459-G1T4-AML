@@ -1,2 +1,4 @@
 # shell scripts run on Linux (EMR): keep Unix line endings even on Windows checkouts
 *.sh text eol=lf
+# byte-for-byte what the dashboard EC2 runs (CRLF): any change to it makes Terraform replace the instance
+aws/infra/dashboard_user_data.sh -text
