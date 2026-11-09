@@ -49,10 +49,6 @@ time, like a bank feed: `split_weeks_spark.py` stages the weeks once, then `repl
 Retired code (old EMR-cluster scripts, the daily simulation, the single weekly state machine) is in git
 history before 9 Nov 2026.
 
-## BQ2 weekly pipeline (SAML-D)
-
-`aml_bq2_weekly` runs one simulated week per execution: feature check, score the deployed model (incremental: only the last 7 days are rescored), Part 1/Part 2 evaluation, an alert if rule R1-R3 fires, then two human approvals (retrain, deploy) answered on the dashboard's BQ2 tab (name + passcode in SSM `/aml/bq2/approver_passcode`). Its jobs run on their own EMR app `aml-bq2-saml` so they do not queue behind other pipelines. Design and results: [`docs/bq2.md`](docs/bq2.md).
-
 ## S3 bucket (data, never code you edit)
 
 ```
