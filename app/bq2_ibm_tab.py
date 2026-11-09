@@ -30,7 +30,9 @@ def render(J):
 
     RW, RS, R2, _ = frames("real")
     NW, NS, N2, NT = frames("new_tactic")
-    START = pd.to_datetime(RW["week_start"]).min()
+    # HI-Large week 1 = Monday 1 Aug 2022 (the data starts that day); BQ1's live feed only holds weeks 4+,
+    # so counting from the first week found would number every week 3 too low
+    START = min(pd.Timestamp("2022-08-01"), pd.to_datetime(RW["week_start"]).min())
     wno = lambda s: int((pd.Timestamp(s) - START).days // 7 + 1)
     for df in (RW, RS, R2, NW, NS, N2):
         if len(df):
