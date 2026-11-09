@@ -4,7 +4,7 @@
 
 variable "dashboard_cidr" {
   type        = string
-  description = "Who may reach the dashboard on port 8501, e.g. 1.2.3.4/32"
+  description = "Who may reach the dashboard on port 8501: 0.0.0.0/0 = public (approvals still need the SSM passcode)"
 }
 
 variable "dashboard_instance_type" {
@@ -52,6 +52,16 @@ resource "aws_iam_role_policy" "dashboard_code" {
   })
 }
 
+# approvals on the public dashboard need a passcode kept in SSM (create it once:
+#   aws ssm put-parameter --name /aml/bq2/approver_passcode --type SecureString --value <passcode>)
+resource "aws_iam_role_policy" "dashboard_passcode" {
+  role = aws_iam_role.dashboard.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = ["ssm:GetParameter"],
+    Resource = "arn:aws:ssm:${var.region}:*:parameter/aml/bq2/approver_passcode" }]
+  })
+}
 resource "aws_iam_instance_profile" "dashboard" {
   name = "aml-dashboard-ec2"
   role = aws_iam_role.dashboard.name
@@ -100,10 +110,10 @@ resource "aws_instance" "dashboard" {
     dd if=/dev/zero of=/swapfile bs=1M count=1024 && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
     dnf install -y python3.11 python3.11-pip
     python3.11 -m venv /opt/dash
-    /opt/dash/bin/pip install pandas pyarrow numpy streamlit altair boto3
+    /opt/dash/bin/pip install pandas pyarrow numpy 'streamlit>=1.67' 'altair>=5' boto3
     cat >/etc/systemd/system/dashboard.service <<'UNIT'
     [Unit]
-    Description=BQ2 dashboard
+    Description=AML dashboard (BQ1 and BQ2)
     After=network-online.target
     [Service]
     Environment=AML_ROOT=s3://${var.bucket}
@@ -111,7 +121,7 @@ resource "aws_instance" "dashboard" {
     Environment=BQ2_APPROVAL_QUEUE_URL=${aws_sqs_queue.bq2_approvals.url}
     ExecStartPre=/usr/bin/aws s3 sync s3://${var.bucket}/app-code /opt/app --delete
     WorkingDirectory=/opt/app
-    ExecStart=/opt/dash/bin/streamlit run app_bq2.py --server.port 8501 --server.headless true
+    ExecStart=/opt/dash/bin/streamlit run bq1_site.py --server.port 8501 --server.headless true
     Restart=always
     [Install]
     WantedBy=multi-user.target

@@ -426,11 +426,16 @@ def approval_page(key):
                 + alt.Chart(pd.DataFrame({"y": [0.5]})).mark_rule(color="#C0504D", strokeDash=[6, 4]).encode(y="y:Q"))
                 .properties(height=230), width="stretch")
     who = st.text_input("Your name (recorded as the approver)", disabled=bool(it.get("demo")))
+    code = st.text_input("Approver passcode", type="password", disabled=bool(it.get("demo")),
+                         help="Anyone can view this dashboard; only people with the passcode can approve or reject.")
     b1, b2, _ = st.columns([1, 1, 4])
-    ok = b1.button("Approve", type="primary", disabled=bool(it.get("demo")) or not who)
-    nok = b2.button("Reject", disabled=bool(it.get("demo")) or not who)
+    ok = b1.button("Approve", type="primary", disabled=bool(it.get("demo")) or not (who and code))
+    nok = b2.button("Reject", disabled=bool(it.get("demo")) or not (who and code))
     if ok or nok:
-        err = aws_data.answer(it, ok, who)
+        err = aws_data.answer(it, ok, who, code)
+        if err and err.startswith("Wrong"):
+            st.error(err)
+            st.stop()
         st.session_state.pop("pending", None)
         load_aws.clear()
         load.clear()

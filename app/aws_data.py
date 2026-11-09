@@ -6,6 +6,7 @@ Settings come from environment variables or Streamlit secrets (never from code):
     AML_ROOT (s3://bucket), AWS_REGION, ATHENA_WORKGROUP (default aml), BQ2_APPROVAL_QUEUE_URL,
     and credentials: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (the aml-bq2-approver user), or a profile.
 """
+import hmac
 import json
 import os
 import time
@@ -127,9 +128,26 @@ def pending_approvals():
     return [{"handle": m["ReceiptHandle"], **json.loads(m["Body"])} for m in r.get("Messages", [])]
 
 
-def answer(item, approve, who):
+PASSCODE_PARAM = "/aml/bq2/approver_passcode"        # SSM SecureString; never in code or in the S3 app bundle
+
+
+def passcode_ok(given):
+    """Constant-time compare with the stored passcode. No parameter, or no access to it, means nobody can approve."""
+    try:
+        want = _session().client("ssm").get_parameter(Name=PASSCODE_PARAM, WithDecryption=True)["Parameter"]["Value"]
+    except Exception:
+        return False
+    ok = bool(given) and hmac.compare_digest(given.encode(), want.encode())
+    if not ok:
+        time.sleep(1.5)                               # slows guessing
+    return ok
+
+
+def answer(item, approve, who, passcode=""):
     """Resume the waiting execution, then delete the queue message. Returns an error text or None.
     A message whose execution already ended (timed out, rejected elsewhere) is dropped from the queue."""
+    if not passcode_ok(passcode):
+        return "Wrong or missing passcode: nothing was sent."
     sfn = _session().client("stepfunctions")
     try:
         if approve:
