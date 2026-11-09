@@ -32,6 +32,7 @@ import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 
@@ -82,6 +83,13 @@ elif RUN_DATE:
 OUT = f"{ROOT}/curated"
 AMOUNT_TYPE = "decimal(28,8)"   # 8 decimals: Bitcoin amounts are tiny (e.g. 0.00843)
 RUN_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+DISK = StorageLevel.MEMORY_AND_DISK
+
+# Keep raw text only in the parsed cache used for quarantine. It is not needed in
+# the transaction-id shuffle or the clean cache shared by the output writers.
+CLEAN_COLS = ["txn_time", "txn_date", "from_bank", "from_account", "to_bank", "to_account",
+              "amount_received", "receiving_currency", "amount_paid", "payment_currency",
+              "payment_format", "is_laundering", "dataset", "week"]
 
 # The Kaggle file has two columns both called "Account", so columns are named by position.
 RAW_COLS = ["ts_raw", "from_bank_raw", "from_account", "to_bank_raw", "to_account",
@@ -99,6 +107,7 @@ def rebalance(df, *cols):
     return spark.sql(f"SELECT /*+ REBALANCE({', '.join(cols)}) */ * FROM {view}")
 spark.sparkContext.setLogLevel("WARN")      # keep logs small: warnings and errors only
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+spark.conf.set("spark.sql.adaptive.enabled", "true")
 
 
 def txn_id_col():
@@ -143,7 +152,8 @@ def first_week_start(df, week_start):
     """Monday of week 1. Weekly mode: the dataset's FIRST_DAY (the file holds one week, so its own
     minimum is not week 1). Daily mode: from the full clean, so a week-to-date run keeps its week number."""
     if WEEK:
-        return spark.range(1).select(F.to_date(F.date_trunc("week", F.lit(FIRST_DAY[BASE])))).first()[0]
+        first = date.fromisoformat(FIRST_DAY[BASE])
+        return first - timedelta(days=first.weekday())
     if RUN_DATE:
         w1 = (spark.read.parquet(f"{OUT}/transactions")
                    .filter((F.col("dataset") == DATASET) & (F.col("week") == 1))
@@ -192,28 +202,14 @@ def write(df, name, partitions=("dataset", "week")):
     df.write.mode("overwrite").partitionBy(*partitions).parquet(f"{OUT}/{name}")
 
 
-def main():
-    # Cache BEFORE add_week: its first-week lookup is an action, and run on the uncached plan
-    # it parsed the whole CSV one extra time.
-    df = add_week(parse(read_raw())
-                  .withColumn("dataset", F.lit(DATASET))
-                  .withColumn("reject_reason", reject_reason())
-                  .cache())
-
-    # ---- quarantine: rejected rows keep their original text values
-    quarantine = (df.filter(F.col("reject_reason").isNotNull())
-                    .select(*RAW_COLS, "reject_reason", "dataset", "week",
-                            F.lit(RUN_AT).alias("loaded_at")))
-
-    # ---- clean rows: drop exact duplicates, add txn_id and flags
-    good = df.filter(F.col("reject_reason").isNull())
-
+def clean_rows(good):
+    """Deduplicate accepted payments without carrying raw CSV text through the shuffle."""
     # txn_id hashes every cleaned column except the label (time, banks, accounts, amounts,
     # currencies, format), so ONE shuffle by txn_id does both jobs:
     #   exact duplicates = same txn_id and same label (adjacent when ordered by label): keep one
     #   two rows identical except for the label would share an id: suffix -2 (label 1 keeps the id)
     same_id = Window.partitionBy("txn_id").orderBy(F.col("is_laundering").desc())
-    clean = (good.withColumn("txn_id", txn_id_col())
+    return (good.select(*CLEAN_COLS).withColumn("txn_id", txn_id_col())
                   .withColumn("_dup", F.lag("is_laundering").over(same_id) == F.col("is_laundering"))
                   .filter(~F.coalesce("_dup", F.lit(False)))
                   .withColumn("_n", F.dense_rank().over(same_id))
@@ -222,8 +218,42 @@ def main():
                   .drop("_dup", "_n")
                   .withColumn("is_self_transfer", (F.col("from_bank") == F.col("to_bank"))
                                                   & (F.col("from_account") == F.col("to_account")))
-                  .withColumn("is_cross_currency", F.col("payment_currency") != F.col("receiving_currency"))
-                  .cache())
+                  .withColumn("is_cross_currency", F.col("payment_currency") != F.col("receiving_currency")))
+
+
+def raw_weekly_quality(df):
+    """Count by reason once, then derive raw/valid/quarantined totals and reason maps."""
+    counts = df.groupBy("dataset", "week", "reject_reason").count()
+    rejected = F.col("reject_reason").isNotNull()
+    return (counts.groupBy("dataset", "week").agg(
+        F.sum("count").alias("rows_raw"),
+        F.sum(F.when(rejected, F.col("count")).otherwise(0)).alias("rows_quarantined"),
+        F.sum(F.when(~rejected, F.col("count")).otherwise(0)).alias("rows_valid"),
+        F.collect_list(F.when(rejected, F.struct("reject_reason", "count"))).alias("_reasons"))
+        .withColumn("quarantine_by_reason", F.when(F.col("rows_quarantined") > 0,
+                    F.to_json(F.map_from_entries("_reasons"))))
+        .drop("_reasons"))
+
+
+def main():
+    # Cache BEFORE add_week: its batch first-week lookup is an action.
+    parsed = (parse(read_raw()).withColumn("dataset", F.lit(DATASET))
+              .withColumn("reject_reason", reject_reason()).persist(DISK))
+    caches = [parsed]
+    try:
+        build_outputs(add_week(parsed), caches)
+    finally:
+        for cached in reversed(caches):
+            cached.unpersist()
+
+
+def build_outputs(df, caches):
+    quarantine = (df.filter(F.col("reject_reason").isNotNull())
+                    .select(*RAW_COLS, "reject_reason", "dataset", "week",
+                            F.lit(RUN_AT).alias("loaded_at")))
+    good = df.filter(F.col("reject_reason").isNull())
+    clean = clean_rows(good).persist(DISK)
+    caches.append(clean)
 
     transactions = clean.select(
         "txn_id", "txn_time", "txn_date",
@@ -233,15 +263,7 @@ def main():
     labels = clean.select("txn_id", "is_laundering", "dataset", "week")
 
     # ---- data-quality report per week
-    raw_wk = df.groupBy("dataset", "week").agg(
-        F.count(F.lit(1)).alias("rows_raw"),
-        F.sum(F.col("reject_reason").isNotNull().cast("int")).alias("rows_quarantined"))
-    reasons =(df.filter(F.col("reject_reason").isNotNull())
-                 .groupBy("dataset", "week", "reject_reason").count()
-                 .groupBy("dataset", "week")
-                 .agg(F.to_json(F.map_from_entries(F.collect_list(F.struct("reject_reason", "count"))))
-                       .alias("quarantine_by_reason")))
-    good_wk = good.groupBy("dataset", "week").agg(F.count(F.lit(1)).alias("rows_valid"))
+    raw_wk = raw_weekly_quality(df)
     clean_wk = clean.groupBy("dataset", "week").agg(
         F.count(F.lit(1)).alias("rows_clean"),
         F.sum(F.col("is_self_transfer").cast("int")).alias("self_transfers"),
@@ -249,20 +271,25 @@ def main():
         F.sum("is_laundering").alias("laundering_rows"),
         F.min("txn_time").cast("string").alias("min_time"),
         F.max("txn_time").cast("string").alias("max_time"))
-    dq_report = (raw_wk.join(reasons, ["dataset", "week"], "left")
-                       .join(good_wk, ["dataset", "week"], "left")
-                       .join(clean_wk, ["dataset", "week"], "left")
+    dq_report = (raw_wk.join(clean_wk, ["dataset", "week"], "left")
                        .fillna(0, subset=["rows_valid", "rows_clean", "self_transfers",
                                           "cross_currency", "laundering_rows"])
                        .withColumn("duplicates_removed", F.col("rows_valid") - F.col("rows_clean"))
                        .drop("rows_valid")
                        .withColumn("run_at", F.lit(RUN_AT)))
+    # Preserve the report's existing column order despite the consolidated aggregation.
+    dq_report = dq_report.select("dataset", "week", "rows_raw", "rows_quarantined",
+        "quarantine_by_reason", "rows_clean", "self_transfers", "cross_currency",
+        "laundering_rows", "min_time", "max_time", "duplicates_removed", "run_at").persist(DISK)
+    caches.append(dq_report)
 
     # ---- daily profile: find where normal activity stops (the "tail")
     daily_profile = (clean.groupBy("dataset", "week", "txn_date")
                           .agg(F.count(F.lit(1)).alias("txns"),
                                F.sum("is_laundering").alias("laundering_txns"))
-                          .withColumn("laundering_rate", F.col("laundering_txns") / F.col("txns")))
+                          .withColumn("laundering_rate", F.col("laundering_txns") / F.col("txns"))
+                          .persist(DISK))
+    caches.append(daily_profile)
 
     write(transactions, "transactions")
     write(labels, "labels")
@@ -270,8 +297,10 @@ def main():
     write(dq_report, "dq_report")
     write(daily_profile, "daily_profile")
 
-    n_raw, n_q = df.count(), quarantine.count()
-    n_clean = clean.count()
+    # The cached report has only one row per week; avoid three full-table count actions.
+    totals = dq_report.agg(*[F.coalesce(F.sum(c), F.lit(0)).alias(c)
+                           for c in ("rows_raw", "rows_quarantined", "rows_clean")]).first()
+    n_raw, n_q, n_clean = totals["rows_raw"], totals["rows_quarantined"], totals["rows_clean"]
     print(f"[clean] {DATASET}{' week ' + WEEK if WEEK else ''}: raw={n_raw} quarantined={n_q} "
           f"duplicates_removed={n_raw - n_q - n_clean} clean={n_clean}")
     print("[clean] daily profile (look for the day normal volume collapses):")
