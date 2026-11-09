@@ -51,6 +51,7 @@ Payment features (t_)
 
 import os
 import sys
+from datetime import date as _date, timedelta as _timedelta
 
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession, Window
@@ -129,16 +130,53 @@ def load_accounts():
     return a
 
 
+def week_folders(tx):
+    """Chunk mode: date -> week folder number, so reads open only the week folders they need.
+    Every table's `week` comes from clean_transactions_spark.py: Monday-to-Sunday weeks numbered in
+    order, so one (date, week) pair from transactions fixes the number of any date. Filtering on
+    `date` alone does not prune folders (the tables are partitioned by week): Spark lists and opens
+    every week's files of these wide tables. None outside chunk mode (whole dataset: read everything)."""
+    if not CHUNK_FROM:
+        return None
+    anchor = tx.filter(F.col("week") > 0).select("txn_date", "week").first()
+    if anchor is None:
+        return None
+    monday = lambda d: d - _timedelta(days=d.weekday())
+    return lambda day: anchor["week"] + (monday(_date.fromisoformat(day) if isinstance(day, str) else day)
+                                         - monday(anchor["txn_date"])).days // 7
+
+
+def in_weeks(df, week_of, lo, hi):
+    """Keep only the week folders holding dates lo..hi (the date filters stay, so rows are unchanged)."""
+    if week_of is None:
+        return df
+    return df.filter(F.col("week").between(week_of(lo), week_of(hi)))
+
+
 def main():
     tx = spark.read.parquet(f"{CURATED}/transactions").filter(F.col("dataset") == DATASET)
+    week_of = week_folders(tx)
     med_base = tx           # median per currency: a chunk uses only payments up to its last day
     if CHUNK_TO:
         med_base = med_base.filter(F.col("txn_date") <= F.lit(CHUNK_TO).cast("date"))
-    med = med_base.groupBy("payment_currency").agg(
-        F.expr("percentile_approx(amount_paid, 0.5)").cast("double").alias("med_paid"))
-    medr = med_base.groupBy("receiving_currency").agg(
-        F.expr("percentile_approx(amount_received, 0.5)").cast("double").alias("med_recv"))
+        if week_of is not None:     # no later week folders
+            med_base = med_base.filter(F.col("week") <= week_of(CHUNK_TO))
+    # Both medians in ONE scan of the dataset (was two scans of every week so far: this grows each
+    # week), collected to the driver (a few currencies).
+    sides = med_base.select(F.explode(F.array(
+        F.struct(F.lit("paid").alias("side"), F.col("payment_currency").alias("ccy"),
+                 F.col("amount_paid").cast("double").alias("amt")),
+        F.struct(F.lit("recv").alias("side"), F.col("receiving_currency").alias("ccy"),
+                 F.col("amount_received").cast("double").alias("amt")))).alias("_s")).select("_s.*")
+    m = (sides.groupBy("side", "ccy")
+              .agg(F.expr("percentile_approx(amt, 0.5)").alias("med")).collect())
+    med = spark.createDataFrame([(r["ccy"], r["med"]) for r in m if r["side"] == "paid"],
+                                "payment_currency string, med_paid double")
+    medr = spark.createDataFrame([(r["ccy"], r["med"]) for r in m if r["side"] == "recv"],
+                                 "receiving_currency string, med_recv double")
     if CHUNK_FROM:
+        lookback_from = _date.fromisoformat(CHUNK_FROM) - _timedelta(days=LOOKBACK_DAYS)
+        tx = in_weeks(tx, week_of, lookback_from, CHUNK_TO)
         tx = tx.filter((F.col("txn_date") >= F.date_sub(F.lit(CHUNK_FROM).cast("date"), LOOKBACK_DAYS))
                        & (F.col("txn_date") <= F.lit(CHUNK_TO).cast("date")))
     t = (tx.join(F.broadcast(med), "payment_currency").join(F.broadcast(medr), "receiving_currency")
@@ -205,9 +243,13 @@ def main():
     in_chunk = lambda df, c="date": (df.filter((F.col(c) >= F.lit(CHUNK_FROM).cast("date"))
                                                & (F.col(c) <= F.lit(CHUNK_TO).cast("date"))) if CHUNK_FROM else df)
     extras = in_chunk(extras).persist(DISK)
+    # the stored wide tables: only the chunk's week folders (+ the exact date filter)
+    read_chunk = lambda name: in_chunk(in_weeks(
+        spark.read.parquet(f"{CURATED}/{name}").filter(F.col("dataset") == DATASET),
+        week_of, CHUNK_FROM, CHUNK_TO))
 
     for src_t, out_t in [(SRC_FEATURES, OUT_FEATURES), (f"{SRC_FEATURES}_sample", f"{OUT_FEATURES}_sample")]:
-        f = in_chunk(spark.read.parquet(f"{CURATED}/{src_t}").filter(F.col("dataset") == DATASET))
+        f = read_chunk(src_t)
         f = f.join(extras, ["acct_bank", "acct", "date"], "left").fillna(
             {c: v for c, v in fill.items()})
         # rebalance: AQE splits big weeks across tasks and merges small ones
@@ -221,8 +263,15 @@ def main():
     rw = Window.partitionBy("dst").orderBy("ts").rangeBetween(-HISTORY_DAYS * DAY, -1)
     a_s = acc.select(F.col("acct").alias("src"), F.col("owner").alias("s_owner"), F.col("bank_country").alias("s_ctry"))
     a_r = acc.select(F.col("acct").alias("dst"), F.col("owner").alias("r_owner"), F.col("bank_country").alias("r_ctry"))
-    p = (t.withColumn("_s_avg", F.avg("lp").over(sw)).withColumn("_s_n", F.count(F.lit(1)).over(sw))
-          .withColumn("_r_avg", F.avg("lr").over(rw))
+    # Chunk mode: the two 14-day windows need only HISTORY_DAYS of history (not all LOOKBACK_DAYS), and
+    # only the chunk's payments are ever looked up (txn_features holds the chunk only): sort less,
+    # then cache and join only the chunk's rows. Same values for every chunk payment.
+    pt = t
+    if CHUNK_FROM:
+        pt = pt.filter(F.col("txn_date") >= F.date_sub(F.lit(CHUNK_FROM).cast("date"), HISTORY_DAYS))
+    pt = (pt.withColumn("_s_avg", F.avg("lp").over(sw)).withColumn("_s_n", F.count(F.lit(1)).over(sw))
+            .withColumn("_r_avg", F.avg("lr").over(rw)))
+    p = (in_chunk(pt, "txn_date")
           .join(small(a_s), "src", "left").join(small(a_r), "dst", "left")
           .select("txn_id",
                   ((F.col("s_owner") == F.col("r_owner")) & ~F.col("is_self_transfer")).cast("float").alias("t_same_owner"),
@@ -239,8 +288,15 @@ def main():
     sfill = {("s_" + c): float(v) for c, v in fill.items()}
     sfill.update({("r_" + c): float(v) for c, v in fill.items()})
     for src_t, out_t in [(SRC_TXN, OUT_TXN), (f"{SRC_TXN}_sample", f"{OUT_TXN}_sample")]:
-        q = in_chunk(spark.read.parquet(f"{CURATED}/{src_t}").filter(F.col("dataset") == DATASET))
-        q = (q.join(p, "txn_id", "left").join(sx, ["s_id", "date"], "left").join(rx, ["r_id", "date"], "left")
+        q = read_chunk(src_t)
+        attach = lambda df: (df.join(p, "txn_id", "left").join(sx, ["s_id", "date"], "left")
+                               .join(rx, ["r_id", "date"], "left"))
+        # The three joins have different keys, so done on q directly each one shuffled the ~140-column
+        # payment rows. Do them on a 4-column key table instead, then join the wide rows ONCE by
+        # txn_id (one row per payment). `cols` is only analysed, never run: it keeps the old column order.
+        cols = attach(q).columns
+        add = attach(q.select("txn_id", "s_id", "r_id", "date")).drop("s_id", "r_id", "date")
+        q = (q.join(add, "txn_id", "left").select(*cols)
               .fillna({**sfill, "t_same_owner": 0.0, "t_cross_country": 0.0, "t_amt_vs_sender": 0.0,
                        "t_amt_vs_receiver": 0.0, "t_sender_new": 0.0}))
         rebalance(q, "dataset", "week").write.mode("overwrite").partitionBy("dataset", "week") \

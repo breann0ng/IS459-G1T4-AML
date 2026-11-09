@@ -177,8 +177,13 @@ def load_transactions():
         txns = txns.filter(F.col("txn_date") >= start)
     if OUTPUT_TO:
         txns = txns.filter(F.col("txn_date") <= F.lit(OUTPUT_TO).cast("date"))
-    labels = (spark.read.parquet(f"{CURATED}/labels")
-                   .filter(F.col("dataset") == DATASET).select("txn_id", "is_laundering"))
+    labels = spark.read.parquet(f"{CURATED}/labels").filter(F.col("dataset") == DATASET)
+    if OUTPUT_FROM or OUTPUT_TO:
+        # A chunk only needs its own weeks' labels: prune label partitions by week instead of
+        # shuffling the whole dataset's labels into the join (grows with every week cleaned).
+        wk = txns.agg(F.min("week"), F.max("week")).first()
+        labels = labels.filter(F.col("week").between(wk[0], wk[1]))
+    labels = labels.select("txn_id", "is_laundering")
     t = txns.join(labels, "txn_id", "left")
 
     try:   # pattern type per payment; a payment in several schemes keeps the first scheme
