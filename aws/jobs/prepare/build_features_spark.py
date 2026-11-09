@@ -262,8 +262,9 @@ def same_day_features(ev):
 
 
 def rolling_features(daily):
-    first_date = daily.select(F.min("date")).first()[0]
-    daily = daily.withColumn("day_idx", F.datediff("date", F.lit(first_date)))
+    # Range windows and age depend on day differences, not the choice of origin.
+    # A fixed origin avoids a full aggregation + driver round-trip for min(date).
+    daily = daily.withColumn("day_idx", F.datediff("date", F.lit("1970-01-01")))
     by_day = Window.partitionBy("acct").orderBy("day_idx")
     last = lambda k: by_day.rangeBetween(-(k - 1), 0)
     for k in ROLLING_DAYS:
@@ -279,21 +280,44 @@ def rolling_features(daily):
 
 
 # ============================================================= exact sliding distinct counts
-def sliding_distinct_max(edges, key_cols, cp_col, W, out_name):
-    """For each key and day: the most distinct counterparties seen within any W-second window
-    ending during that day. Exact and O(n log n): each key-counterparty pair is merged into
-    'active runs' (payments less than W apart); a run counts from its first payment until W
-    after its last. A running sum of +1 (run starts) / -1 (run expires) gives the live count,
-    and a 0-event at every payment reads it."""
+def active_runs(edges, key_cols, cp_col, W):
+    """Merge each key-counterparty's payments into runs separated by more than W seconds."""
     pair = Window.partitionBy(*key_cols, cp_col).orderBy("ts")
-    runs = (edges
+    return (edges
         .withColumn("_new", (F.lag("ts").over(pair).isNull()
                              | (F.col("ts") - F.lag("ts").over(pair) > W)).cast("int"))
         .withColumn("_run", F.sum("_new").over(pair.rowsBetween(Window.unboundedPreceding, 0)))
         .groupBy(*key_cols, cp_col, "_run")
         .agg(F.min("ts").alias("start"), F.max("ts").alias("last")))
-    ev = (runs.select(*key_cols, F.col("start").alias("t"), F.lit(1).alias("delta"))
-          .unionByName(runs.select(*key_cols, (F.col("last") + W + 1).alias("t"), F.lit(-1).alias("delta")))
+
+
+def run_events(runs, key_cols, W):
+    """Emit both endpoints in one pass, so the run-building plan is not duplicated."""
+    return (runs.select(*key_cols, F.explode(F.array(
+                F.struct(F.col("start").alias("t"), F.lit(1).alias("delta")),
+                F.struct((F.col("last") + W + 1).alias("t"), F.lit(-1).alias("delta"))
+            )).alias("_event"))
+            .select(*key_cols, "_event.*"))
+
+
+def directional_edges(edges):
+    """One input scan yields incoming and outgoing counterparty edges."""
+    return (edges.select("ts", F.explode(F.array(
+                F.struct(F.col("dst").alias("acct"), F.col("src").alias("cp"), F.lit("in").alias("dir")),
+                F.struct(F.col("src").alias("acct"), F.col("dst").alias("cp"), F.lit("out").alias("dir"))
+            )).alias("_edge"))
+            .select("ts", "_edge.*"))
+
+
+def sliding_distinct_max(edges, key_cols, cp_col, W, out_name, runs=None):
+    """For each key and day: the most distinct counterparties seen within any W-second window
+    ending during that day. Exact and O(n log n): each key-counterparty pair is merged into
+    'active runs' (payments less than W apart); a run counts from its first payment until W
+    after its last. A running sum of +1 (run starts) / -1 (run expires) gives the live count,
+    and a 0-event at every payment reads it."""
+    if runs is None:
+        runs = active_runs(edges, key_cols, cp_col, W)
+    ev = (run_events(runs, key_cols, W)
           .unionByName(edges.select(*key_cols, F.col("ts").alias("t"), F.lit(0).alias("delta"))))
     live = (Window.partitionBy(*key_cols).orderBy("t", F.col("delta").desc())
                   .rowsBetween(Window.unboundedPreceding, 0))
@@ -303,25 +327,14 @@ def sliding_distinct_max(edges, key_cols, cp_col, W, out_name):
               .agg(F.max("n").alias(out_name)))
 
 
-def gather_scatter_max(edges, W, out_name):
+def gather_scatter_max(edges, W, out_name, runs=None):
     """Like sliding_distinct_max, but tracks distinct senders AND receivers together and
     reports the most min(senders, receivers) reached during the day."""
-    def runs(df):
-        pair = Window.partitionBy("acct", "cp").orderBy("ts")
-        return (df
-            .withColumn("_new", (F.lag("ts").over(pair).isNull()
-                                 | (F.col("ts") - F.lag("ts").over(pair) > W)).cast("int"))
-            .withColumn("_run", F.sum("_new").over(pair.rowsBetween(Window.unboundedPreceding, 0)))
-            .groupBy("acct", "cp", "_run").agg(F.min("ts").alias("start"), F.max("ts").alias("last")))
-
-    ins = edges.select(F.col("dst").alias("acct"), F.col("src").alias("cp"), "ts")
-    outs = edges.select(F.col("src").alias("acct"), F.col("dst").alias("cp"), "ts")
-    r_in, r_out = runs(ins), runs(outs)
-    ev = (r_in.select("acct", F.col("start").alias("t"), F.lit(1).alias("d_in"), F.lit(0).alias("d_out"))
-          .unionByName(r_in.select("acct", (F.col("last") + W + 1).alias("t"), F.lit(-1).alias("d_in"), F.lit(0).alias("d_out")))
-          .unionByName(r_out.select("acct", F.col("start").alias("t"), F.lit(0).alias("d_in"), F.lit(1).alias("d_out")))
-          .unionByName(r_out.select("acct", (F.col("last") + W + 1).alias("t"), F.lit(0).alias("d_in"), F.lit(-1).alias("d_out")))
-          .withColumn("delta", F.col("d_in") + F.col("d_out")))
+    if runs is None:
+        runs = active_runs(directional_edges(edges), ["acct", "dir"], "cp", W)
+    ev = (run_events(runs, ["acct", "dir"], W)
+          .withColumn("d_in", F.when(F.col("dir") == "in", F.col("delta")).otherwise(0))
+          .withColumn("d_out", F.when(F.col("dir") == "out", F.col("delta")).otherwise(0)))
     live = (Window.partitionBy("acct").orderBy("t", F.col("delta").desc())
                   .rowsBetween(Window.unboundedPreceding, 0))
     return (ev.withColumn("m", F.least(F.sum("d_in").over(live), F.sum("d_out").over(live)))
@@ -490,14 +503,20 @@ def main():
     for w in (WINDOWS_DAYS if fan_windows_needed() else []):
         W = w * DAY
         e_w = since(edges, w)          # chunk mode: only the w days of history this window needs
+        # All three features use the same runs. Cache the narrow run table once per window;
+        # release it once the three results have been eagerly checkpointed.
+        runs = active_runs(directional_edges(e_w), ["acct", "dir"], "cp", W).persist(DISK)
         fin = sliding_distinct_max(e_w.select(F.col("dst").alias("acct"), F.col("src").alias("cp"), "ts"),
-                                   ["acct"], "cp", W, f"fanin_max_{w}d")
+                                   ["acct"], "cp", W, f"fanin_max_{w}d", runs=runs.filter("dir = 'in'"))
         fout = sliding_distinct_max(e_w.select(F.col("src").alias("acct"), F.col("dst").alias("cp"), "ts"),
-                                    ["acct"], "cp", W, f"fanout_max_{w}d")
-        gs = gather_scatter_max(e_w, W, f"gs_max_{w}d")
-        fin = materialise(fin, f"fanin_{w}d")
-        fout = materialise(fout, f"fanout_{w}d")
-        gs = materialise(gs, f"gather_scatter_{w}d")
+                                    ["acct"], "cp", W, f"fanout_max_{w}d", runs=runs.filter("dir = 'out'"))
+        gs = gather_scatter_max(e_w, W, f"gs_max_{w}d", runs=runs)
+        try:
+            fin = materialise(fin, f"fanin_{w}d")
+            fout = materialise(fout, f"fanout_{w}d")
+            gs = materialise(gs, f"gather_scatter_{w}d")
+        finally:
+            runs.unpersist()
         feats = (feats.join(fin, ["acct", "date"], "left")
                       .join(fout, ["acct", "date"], "left")
                       .join(gs, ["acct", "date"], "left"))
@@ -514,10 +533,7 @@ def main():
             cyc = materialise(cycle_features(since(small, CYCLE_WINDOW_DAYS + 6)), "cycles")
             feats = feats.join(cyc, ["acct", "date"], "left")
             feats = feats.fillna(0, subset=["cycles_today"])
-            # from the cached daily table (same dates as feats): asking feats itself ran the
-            # whole uncached feature plan once extra just to find this date
-            first_date = daily.select(F.min("date")).first()[0]
-            last7 = (Window.partitionBy("acct").orderBy(F.datediff("date", F.lit(first_date)))
+            last7 = (Window.partitionBy("acct").orderBy(F.datediff("date", F.lit("1970-01-01")))
                            .rangeBetween(-6, 0))
             feats = feats.withColumn("cycles_7d", F.sum("cycles_today").over(last7))
             graph_cols += ["cycles_today", "cycles_7d"]
