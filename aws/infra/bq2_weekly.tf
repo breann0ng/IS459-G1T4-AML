@@ -21,6 +21,53 @@ variable "bq2_schedule" {
 
 data "aws_caller_identity" "me" {}
 
+# Dedicated EMR Serverless app for the BQ2 SAML pipeline. The shared app (emr.tf) is capped at 16 vCPU
+# and a teammate's long jobs made our steps queue for 3-13 minutes each. Idle = $0 (billing is per job).
+resource "aws_emrserverless_application" "bq2_saml" {
+  name          = "aml-bq2-saml"
+  release_label = var.emr_release_label
+  type          = "spark"
+  architecture  = "X86_64"
+
+  auto_start_configuration { enabled = true }
+  auto_stop_configuration {
+    enabled              = true
+    idle_timeout_minutes = 5
+  }
+
+  maximum_capacity { # cost cap; Part 1 (Spark, up to 16 vCPU) runs beside score/eval (5 vCPU each)
+    cpu    = "32 vCPU"
+    memory = "128 GB"
+  }
+
+  scheduler_configuration {
+    max_concurrent_runs   = 3
+    queue_timeout_minutes = 60
+  }
+
+  runtime_configuration {
+    classification = "spark-defaults"
+    properties = {
+      "spark.hadoop.hive.metastore.client.factory.class" = "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+    }
+  }
+}
+
+# Additive: the role is shared with other pipelines, so do not touch its existing policy.
+data "aws_iam_policy_document" "sfn_bq2_saml_app" {
+  statement {
+    sid       = "RunJobsOnDedicatedApp"
+    actions   = ["emr-serverless:StartJobRun", "emr-serverless:GetJobRun", "emr-serverless:CancelJobRun"]
+    resources = [aws_emrserverless_application.bq2_saml.arn, "${aws_emrserverless_application.bq2_saml.arn}/jobruns/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "sfn_bq2_saml_app" {
+  name   = "aml-sfn-bq2-saml-app"
+  role   = aws_iam_role.sfn_bq2.id
+  policy = data.aws_iam_policy_document.sfn_bq2_saml_app.json
+}
+
 resource "aws_sns_topic" "bq2" {
   name = "aml-bq2-alerts"
 }
