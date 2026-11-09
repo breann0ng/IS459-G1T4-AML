@@ -56,15 +56,19 @@ def _cast(v, t):
     return v
 
 
-def query(sql):
-    """Run one Athena query in the cost-capped workgroup and return a list of dicts."""
+def query(sql, timeout=45):
+    """Run one Athena query in the cost-capped workgroup and return a list of dicts (TimeoutError after timeout s)."""
     a = _session().client("athena")
     qid = a.start_query_execution(QueryString=sql, WorkGroup=_cfg("ATHENA_WORKGROUP", "aml"),
                                   QueryExecutionContext={"Database": DB})["QueryExecutionId"]
+    deadline = time.time() + timeout
     while True:
         st = a.get_query_execution(QueryExecutionId=qid)["QueryExecution"]["Status"]
         if st["State"] in ("SUCCEEDED", "FAILED", "CANCELLED"):
             break
+        if time.time() > deadline:                    # a hung query: cancel it so the page falls back, never spins
+            a.stop_query_execution(QueryExecutionId=qid)
+            raise TimeoutError(f"Athena query {qid} still running after {timeout}s; cancelled")
         time.sleep(0.5)
     if st["State"] != "SUCCEEDED":
         raise RuntimeError(f"Athena {st['State']}: {st.get('StateChangeReason')}")
