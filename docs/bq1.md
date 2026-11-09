@@ -1,6 +1,6 @@
 # IS459 G1T4 · Anti-money-laundering pipeline (BQ1 + BQ2)
 
-> **Layout note (all-combined):** paths below are from the old EMR layout. `pipeline/` and `bq2/` scripts now live in `aws/jobs/<prepare|bq1|bq2>/`, reports in `local/reports/`, run scripts in `local/legacy-emr/`. To run the legacy EMR scripts, copy `aws/jobs/*/*` and `local/legacy-emr/*` into one folder on the primary node (`aws/deploy/deploy.sh` builds exactly that flat folder in `build/jobs/`). See the root README.
+> **Layout note:** paths below are from the old EMR-cluster layout, kept as a record of the experiments. The scripts now live in `aws/jobs/<setup|prepare|bq1|bq2>/` and run on EMR Serverless through the state machines in `aws/orchestration/`; reports are in `local/reports/`. See the root README.
 
 Big data pipeline on AWS EMR (Spark) over the IBM AML dataset, with SAML-D added for BQ2.
 

@@ -31,7 +31,10 @@ d = _load()
 _ONEOFF = Path(__file__).parent / "data" / "dashboard_data_enrui_breann_mld20.json"
 if d.get("weeks") and _ONEOFF.exists():
     d["schemes_total"] = json.loads(_ONEOFF.read_text())["schemes_total"]
-f = next(r for r in d["stage1"] if r["level"] == "account_day" and r["cutoff"] == "frozen_threshold")
+# the alerts analysts get: daily capacity > alert expansion > frozen threshold (as aws_data.used_row)
+_ad = [r for r in d["stage1"] if r["level"] == "account_day"]
+f = next((r for p in ("capacity", "expand") for r in _ad if str(r["cutoff"]).startswith(p)), None) \
+    or next(r for r in _ad if r["cutoff"] == "frozen_threshold")
 tot = d["schemes_total"]
 
 def question(text, color):
@@ -98,7 +101,7 @@ with c1, st.container(border=True, key="card_bq1"):
     a.metric("Alerts a day", f"{f['alerts_per_day']:,.0f}")
     b.metric("Real alerts", f"{f['precision']:.0%}")
     c.metric("Schemes caught", f"{tot['caught']:.0%}")
-    answer(f"9 in 10 alerts are real, but only {tot['alert_before_end_eod']:.0%} of schemes are caught while "
+    answer(f"{f['precision']:.0%} of alerts are real, but only {tot['alert_before_end_eod']:.0%} of schemes are caught while "
            "still running.")
     st.page_link("app_bq1.py", label="See the BQ1 results", icon=":material/arrow_forward:")
 

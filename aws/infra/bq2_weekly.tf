@@ -1,5 +1,5 @@
 # BQ2 weekly pipeline: state machine, approval queue, notifications, schedule.
-# The definition is generated: python aws/step-functions/build_bq2_weekly.py (needs the topic ARN and queue URL
+# The definition is generated: python build_bq2_weekly.py (BQ2 team's generator, not in this repo) (needs the topic ARN and queue URL
 # below, so apply the topic and queue first: terraform apply -target=aws_sns_topic.bq2 -target=aws_sqs_queue.bq2_approvals).
 
 variable "bq2_notify_emails" {
@@ -20,53 +20,6 @@ variable "bq2_schedule" {
 }
 
 data "aws_caller_identity" "me" {}
-
-# Dedicated EMR Serverless app for the BQ2 SAML pipeline. The shared app (emr.tf) is capped at 16 vCPU
-# and a teammate's long jobs made our steps queue for 3-13 minutes each. Idle = $0 (billing is per job).
-resource "aws_emrserverless_application" "bq2_saml" {
-  name          = "aml-bq2-saml"
-  release_label = var.emr_release_label
-  type          = "spark"
-  architecture  = "X86_64"
-
-  auto_start_configuration { enabled = true }
-  auto_stop_configuration {
-    enabled              = true
-    idle_timeout_minutes = 5
-  }
-
-  maximum_capacity { # cost cap; Part 1 (Spark, up to 16 vCPU) runs beside score/eval (5 vCPU each)
-    cpu    = "32 vCPU"
-    memory = "128 GB"
-  }
-
-  scheduler_configuration {
-    max_concurrent_runs   = 3
-    queue_timeout_minutes = 60
-  }
-
-  runtime_configuration {
-    classification = "spark-defaults"
-    properties = {
-      "spark.hadoop.hive.metastore.client.factory.class" = "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
-    }
-  }
-}
-
-# Additive: the role is shared with other pipelines, so do not touch its existing policy.
-data "aws_iam_policy_document" "sfn_bq2_saml_app" {
-  statement {
-    sid       = "RunJobsOnDedicatedApp"
-    actions   = ["emr-serverless:StartJobRun", "emr-serverless:GetJobRun", "emr-serverless:CancelJobRun"]
-    resources = [aws_emrserverless_application.bq2_saml.arn, "${aws_emrserverless_application.bq2_saml.arn}/jobruns/*"]
-  }
-}
-
-resource "aws_iam_role_policy" "sfn_bq2_saml_app" {
-  name   = "aml-sfn-bq2-saml-app"
-  role   = aws_iam_role.sfn_bq2.id
-  policy = data.aws_iam_policy_document.sfn_bq2_saml_app.json
-}
 
 resource "aws_sns_topic" "bq2" {
   name = "aml-bq2-alerts"
@@ -163,14 +116,14 @@ resource "aws_iam_role_policy" "sfn_bq2" {
 resource "aws_sfn_state_machine" "bq2_weekly" {
   name       = "aml_bq2_weekly"
   role_arn   = aws_iam_role.sfn_bq2.arn
-  definition = file("${path.module}/../step-functions/aml_bq2_weekly.asl.json")
+  definition = file("${path.module}/../orchestration/state-machines/aml_bq2_weekly.asl.json")
   logging_configuration {
     log_destination        = "${aws_cloudwatch_log_group.bq2_weekly.arn}:*"
     include_execution_data = true
     level                  = "ERROR"
   }
 
-  # The live definition is deployed by the BQ2 team (aws/step-functions/aml_bq2_weekly.asl.json, via the console
+  # The live definition is deployed by the BQ2 team (aws/orchestration/state-machines/aml_bq2_weekly.asl.json, via the console
   # or CLI) when they switch it over; an infrastructure apply must never swap it under a running pipeline.
   lifecycle {
     ignore_changes = [definition]
@@ -245,4 +198,53 @@ locals {
 resource "aws_iam_user_policy" "bq2_approver" {
   user   = aws_iam_user.bq2_approver.name
   policy = local.dashboard_policy
+}
+
+# ---------------------------------------------------------------- BQ2 SAML-D's own EMR Serverless app
+# Applied on 2026-11-09 from a local file that was never pushed; written back here from the shared state so
+# applying main keeps it. SAML-D's weekly jobs run here instead of the shared aml-jobs app (00ga27nqsrmqmp09).
+resource "aws_emrserverless_application" "bq2_saml" {
+  name          = "aml-bq2-saml"
+  release_label = var.emr_release_label
+  type          = "spark"
+  architecture  = "X86_64"
+
+  auto_start_configuration { enabled = true }
+  auto_stop_configuration {
+    enabled              = true
+    idle_timeout_minutes = 5
+  }
+  maximum_capacity {
+    cpu    = "32 vCPU"
+    memory = "128 GB"
+    disk   = "400000 GB"
+  }
+  scheduler_configuration {
+    max_concurrent_runs   = 3
+    queue_timeout_minutes = 60
+  }
+  runtime_configuration {
+    classification = "spark-defaults"
+    properties = {
+      "spark.hadoop.hive.metastore.client.factory.class" = "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+    }
+  }
+  monitoring_configuration {
+    managed_persistence_monitoring_configuration { enabled = true }
+  }
+  job_level_cost_allocation_configuration { enabled = false }
+}
+
+resource "aws_iam_role_policy" "sfn_bq2_saml_app" {
+  name = "aml-sfn-bq2-saml-app"
+  role = aws_iam_role.sfn_bq2.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "RunJobsOnDedicatedApp"
+      Effect   = "Allow"
+      Action   = ["emr-serverless:StartJobRun", "emr-serverless:GetJobRun", "emr-serverless:CancelJobRun"]
+      Resource = ["${aws_emrserverless_application.bq2_saml.arn}/jobruns/*", aws_emrserverless_application.bq2_saml.arn]
+    }]
+  })
 }

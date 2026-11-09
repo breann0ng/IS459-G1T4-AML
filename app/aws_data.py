@@ -214,7 +214,7 @@ def load_ibm():
 # ------------------------------------------------------------------ BQ1 weekly results (aml_bq1_score -> analytics.live_*)
 # Same keys as data/dashboard_data_live_HI-Large-live.json, so app_bq1.py and home.py show every finished week
 # without a new export: each week is pooled from the tables the weekly pipeline writes (Athena tables in
-# aws/sql/ddl/create_bq1_live_tables.sql). Scheme timings (speed) still come from the one-off run's file.
+# aws/athena/ddl/create_bq1_live_tables.sql). Scheme timings (speed) still come from the one-off run's file.
 BQ1_LIVE_DS = "HI-Large-live"
 NAMED = ("cycle", "fan_in", "fan_out", "gather_scatter", "layering", "random", "scatter_gather")
 _bq1_cache = {}
@@ -225,6 +225,16 @@ def bq1_config():
     champ = get_json("models/bq1_champion.json", {}) or {}
     meta = get_json(f"models/{champ.get('run', 'bq1')}/meta.json", {}) or {}
     return meta.get("validated_run", "txn_v3m_xp")
+
+
+def used_row(rows):
+    """The alerts the analysts get, the last rule the scoring step applied: daily capacity (capacity<K>) >
+    alert expansion (expand<LOW>) > the frozen threshold. Same order as bq1_checks.used_row."""
+    for prefix in ("capacity", "expand"):
+        x = rows[rows["cutoff"].astype(str).str.startswith(prefix)]
+        if not x.empty:
+            return x.iloc[0]
+    return rows[rows["cutoff"] == "frozen_threshold"].iloc[0]
 
 
 def load_bq1_live(dataset=BQ1_LIVE_DS, weeks=None, ttl=600):
@@ -304,8 +314,7 @@ def _bq1_live(ds, weeks=None):
     s1 = pd.DataFrame(s1)
     pos_by_level = s1.groupby("level")["positives"].first().to_dict()
     ad = s1[s1["level"] == "account_day"]
-    used = ad[ad["cutoff"].str.startswith("expand")]
-    used = (used if not used.empty else ad[ad["cutoff"] == "frozen_threshold"]).iloc[0]   # the alerts analysts get
+    used = used_row(ad)                                                       # the alerts analysts get
 
     b = pd.DataFrame(res["budget"])
     if not b.empty:

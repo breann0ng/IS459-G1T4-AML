@@ -16,9 +16,10 @@ Writes  analytics/final_results/     stage 1 metrics: payment and account-day le
         analytics/final_budget/      precision / recall if analysts review the top K per day
         analytics/final_patterns/    per pattern: laundering caught (payment + account-day level)
         analytics/final_schemes/     per scheme: caught?, when, share of its payments still to come
-        analytics/final_alert_rows/  every flagged account-day + its 78 account features (stage 2 input);
-                                     with alert expansion in meta.json, the expanded alerts (row
-                                     cutoff=expand<LOW> in final_results, caught_used in final_patterns)
+        analytics/final_alert_rows/  every alert analysts get + its 78 account features (stage 2 input):
+                                     threshold -> alert expansion (meta.json) -> daily capacity (AML_CAPACITY)
+                                     (rows cutoff=expand<LOW> / capacity<K> in final_results, caught_used in
+                                     final_patterns, levels account_day_raised / account_day_used in final_daily)
         analytics/final_truth/       true laundering account-days per pattern (stage 2 recall base)
         analytics/final_flagged_payments/  flagged payments (for drill-down)
 """
@@ -43,6 +44,10 @@ RUN_DATE = os.environ.get("AML_RUN_DATE")
 if RUN_DATE and not DATE_FROM:
     DATE_FROM = DATE_TO = RUN_DATE
 MODEL_DIR = f"{ROOT}/models/{RUN}"
+# Daily analyst capacity (aml_bq1_score's `capacity`, a business number): at most this many alerts a day reach the
+# analysts, highest scores first. It uses scores only, never labels, and is the same rule every day, so it only
+# binds on days the model raises more alerts than the team can review (e.g. month-end payment bursts). 0 = no cap.
+CAPACITY = int(float(os.environ.get("AML_CAPACITY") or 0))
 TOP_K = [100, 250, 500, 1000, 2000, 5000]
 PATTERNS = ["fan_in", "fan_out", "gather_scatter", "scatter_gather", "cycle", "bipartite", "stack", "random"]
 BINS = 20000                                 # score histogram for PR-AUC
@@ -108,7 +113,8 @@ def main():
     model_str = text(f"{MODEL_DIR}/stage1.txt")
     feats, thr = meta["stage1_features"], float(meta["threshold"])
     bc = spark.sparkContext.broadcast(model_str)
-    print(f"[score] {DATASET} dates {DATE_FROM or 'all'} to {DATE_TO or 'all'}: model from {meta['validated_run']}, {len(feats)} features, threshold {thr:.4f}")
+    print(f"[score] {DATASET} dates {DATE_FROM or 'all'} to {DATE_TO or 'all'}: model from {meta['validated_run']}, "
+          f"{len(feats)} features, threshold {thr:.4f}, capacity {CAPACITY or 'none'}/day")
 
     def score_part(it):
         import lightgbm as lgb
@@ -194,7 +200,9 @@ def main():
             alert_ids = alert_ids.unionByName(new).distinct()
         alert_ids = alert_ids.join(adj.select("id", "date"), ["id", "date"]).persist(DISK)
     adj = adj.join(alert_ids.withColumn("alert", F.lit(1)), ["id", "date"], "left").fillna(0, ["alert"]).persist(DISK)
-    if low:
+
+    def alert_result(cutoff):
+        """Metrics of the current `alert` column (one results row, account-day level)."""
         pos = adj.filter("label = 1").count()
         scheme = F.col("pattern_label").isin(PATTERNS).cast("int")
         t = adj.agg(F.sum("alert").alias("a"), F.sum(F.col("alert") * F.col("label")).alias("tp"),
@@ -202,13 +210,32 @@ def main():
                     F.sum(F.col("alert") * F.col("label") * (1 - scheme)).alias("cu"),
                     F.sum(F.col("label") * (1 - scheme)).alias("nu")).first()
         p, r, f = prf(t["tp"], t["a"], pos)
-        res.append({"level": "account_day", "cutoff": f"expand{low:g}", "threshold": thr, "units": "account-days",
+        res.append({"level": "account_day", "cutoff": cutoff, "threshold": thr, "units": "account-days",
                     "alerts": int(t["a"]), "true_alerts": int(t["tp"]), "positives": pos, "precision": p,
                     "recall": r, "f1": f, "alerts_per_day": t["a"] / days, "pr_auc": None,
                     "recall_patterns": t["c"] / t["n"] if t["n"] else None,
                     "recall_unclassified": t["cu"] / t["nu"] if t["nu"] else None})
-        print(f"[score] account_day + expansion (>= {low:g}): P {p:.3f} R {r:.3f} F1 {f:.3f} "
-              f"alerts/day {t['a'] / days:.0f}")
+        print(f"[score] account_day {cutoff}: P {p:.3f} R {r:.3f} F1 {f:.3f} alerts/day {t['a'] / days:.0f}")
+
+    def daily_alerts(level):
+        return (adj.groupBy("date").agg(F.count(F.lit(1)).alias("rows"), F.sum("label").alias("laundering"),
+                                        F.sum("alert").alias("alerts"), F.sum(F.col("alert") * F.col("label")).alias("true_alerts"))
+                   .withColumn("level", F.lit(level)))
+
+    if low:
+        alert_result(f"expand{low:g}")
+    daily_parts.append(daily_alerts("account_day_raised"))          # what the model raised, before the cap
+
+    # ---------------- daily analyst capacity: keep the CAPACITY highest-scoring alerts of each day
+    if CAPACITY:
+        rank = F.row_number().over(Window.partitionBy("date").orderBy(F.col("score").desc(), F.col("id")))
+        kept = (adj.filter("alert = 1").select("id", "date", rank.alias("rk"))
+                   .filter(F.col("rk") <= CAPACITY).select("id", "date", F.lit(1).alias("kept")))
+        adj = (adj.join(kept, ["id", "date"], "left")
+                  .withColumn("alert", F.coalesce("kept", F.lit(0)) * F.col("alert")).drop("kept").persist(DISK))
+        alert_result(f"capacity{CAPACITY}")
+    daily_parts.append(daily_alerts("account_day_used"))            # what the analysts get
+
     pat_ad = (adj.filter("label = 1").groupBy("pattern_label")
                 .agg(F.count(F.lit(1)).alias("positives"),
                      F.sum((F.col("score") >= thr).cast("int")).alias("caught"),

@@ -109,7 +109,21 @@ if SPEED_FROM_ONEOFF:
     d = {**d, **{k: _o[k] for k in ("schemes", "schemes_by_pattern", "schemes_total", "scheme_hours_hist") if k in _o}}
 s1 = pd.DataFrame(d["stage1"])
 ad = s1[s1["level"] == "account_day"]
-frozen = ad[ad["cutoff"] == "frozen_threshold"].iloc[0]
+
+
+def used_row(rows):
+    """The alerts analysts get (same rule as aws_data.used_row / bq1_checks.used_row): the daily capacity row when
+    the pipeline applied one, else alert expansion, else the frozen threshold."""
+    for prefix in ("capacity", "expand"):
+        x = rows[rows["cutoff"].astype(str).str.startswith(prefix)]
+        if not x.empty:
+            return x.iloc[0]
+    return rows[rows["cutoff"] == "frozen_threshold"].iloc[0]
+
+
+frozen = used_row(ad)          # "the model's setting" everywhere below: threshold -> expansion -> daily capacity
+cap_row = ad[ad["cutoff"].astype(str).str.startswith("capacity")]
+CAPACITY = int(str(cap_row["cutoff"].iloc[0])[len("capacity"):]) if not cap_row.empty else None
 tot = d["schemes_total"]
 days = int(frozen["days"])
 thr_k = round(frozen["alerts_per_day"])
@@ -138,7 +152,35 @@ with tab1:
     st.markdown(f":material/touch_app: **How to use:** drag the slider to the number of alerts your team can review a day. The four numbers and "
             f"the chart follow it. It starts at the model's own setting ({thr_k:,} a day), which sections 2 to 4 use.")
 
-    opts = ad[ad["cutoff"].str.startswith("top") | (ad["cutoff"] == "frozen_threshold")].copy()
+    if CAPACITY:
+        # which days hit the cap: the model raised more alerts than the team can review, so the lowest-scoring wait
+        dly = pd.DataFrame(d.get("daily") or [])
+        raised = dly[dly["level"] == "account_day_raised"] if not dly.empty else dly
+        capped = raised[raised["alerts"] > CAPACITY].copy() if not raised.empty else raised
+        if len(capped):
+            capped["held"] = capped["alerts"] - CAPACITY
+        big = capped[capped["alerts"] > 1.1 * CAPACITY] if len(capped) else capped     # >10% held back
+        small = capped[capped["alerts"] <= 1.1 * CAPACITY] if len(capped) else capped
+        big_txt = ", ".join(f"{pd.to_datetime(r['date']):%d %b} ({int(r['alerts']):,} raised)" for _, r in big.iterrows())
+        small_txt = ", ".join(f"{pd.to_datetime(x):%d %b}" for x in small["date"]) if len(small) else ""
+        before = ad[ad["cutoff"].astype(str).str.startswith("expand")]
+        before = before.iloc[0] if not before.empty else ad[ad["cutoff"] == "frozen_threshold"].iloc[0]
+        with st.container(border=True):
+            st.markdown(f"**:material/inbox: Daily capacity: {CAPACITY:,} alerts.** The team can review {CAPACITY:,} "
+                        f"alerts a day, so on a day the model raises more, the highest-scoring {CAPACITY:,} go to analysts. "
+                        + (f"That happened on {len(capped)} of {days} days. " if len(capped) else "No day has hit it yet. ")
+                        + (f"Big cuts on payment-burst days, when ordinary accounts suddenly look busy: {big_txt}. "
+                           if len(big) else "")
+                        + (f"Just over capacity on {len(small)} more day{'s' if len(small) > 1 else ''} "
+                           f"({small_txt}): only the lowest-scoring {int(small['held'].max()):,} or fewer waited. "
+                           if len(small) else "")
+                        + f"Without the cap: {pct(before['precision'])} real alerts, {pct(before['recall'])} of laundering "
+                          f"caught, {per_day(before['alerts_per_day'])} alerts a day.")
+            st.caption("The cap uses only the model's scores, never the answers, and is the same rule every day. The "
+                       "capacity is the team's review capacity (a business number in aml_bq1_score), set before testing; "
+                       "on most days the model raises fewer alerts than that and nothing changes.")
+
+    opts = ad[ad["cutoff"].str.startswith("top") | (ad["cutoff"] == frozen["cutoff"])].copy()
     opts["k"] = opts["alerts_per_day"].round().astype(int)
     opts = opts.sort_values("k")
     pick = st.select_slider("Alerts your team reviews per day", options=opts["k"].tolist(), value=thr_k,
@@ -230,7 +272,8 @@ with tab1:
                  "Precision = real alerts / all alerts; recall = laundering that got an alert / all laundering. Every "
                  f"number comes from one test on {days} unseen days of HI-Large ({frozen['date_from'][:10]} to "
                  f"{frozen['date_to'][:10]}, {frozen['payments'] / 1e6:.1f}M payments); the threshold was fixed on "
-                 "HI-Small and HI-Medium validation days and never tuned on HI-Large. The data is IBM's synthetic AML "
+                 "HI-Small and HI-Medium validation days and never tuned on HI-Large, and the daily capacity is the "
+                 "team's review capacity, also set before testing. The data is IBM's synthetic AML "
                  "data, so real banks' volumes and patterns will differ."))
 
 

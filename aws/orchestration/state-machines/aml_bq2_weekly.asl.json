@@ -1,5 +1,5 @@
 {
-  "Comment": "AML BQ2 weekly run for SAML-R: one simulated week per execution. Features come from the shared data stage: aml_prepare {dataset: SAML-R} converts SAML-D (first time only), cleans and builds the features of the whole dataset once; later weeks return at once (its progress marker).",
+  "Comment": "AML BQ2 weekly run for SAML-R: one simulated week per execution. Features come from the shared data stage: aml_prepare {dataset, week: week_start} prepares this week (SAML arrives one week at a time, like a bank feed; SAML-D is converted and split into weeks once beforehand). A week that the S3 replay already prepared returns at once (its progress marker).",
   "StartAt": "HasWeek",
   "States": {
     "HasWeek": {
@@ -255,6 +255,7 @@
                 "StateMachineArn": "arn:aws:states:us-east-1:390402569482:stateMachine:aml_prepare",
                 "Input": {
                   "dataset.$": "$.dataset",
+                  "week.$": "$.week_start",
                   "features": true,
                   "AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID.$": "$$.Execution.Id",
                   "app_id": "00ga5rjkauu2r909"
