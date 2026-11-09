@@ -49,7 +49,13 @@ NT = f"{DATASET}-NT"
 PLAN = {DATASET: {"v0": "all"}, NT: {"v0": "nofan", "v1": "all"}}
 PATTERNS = ["fan_in", "fan_out", "gather_scatter", "scatter_gather", "cycle", "bipartite", "stack", "random",
             "unclassified"]
-CURATED, ANALYTICS = f"{ROOT}/curated", f"{ROOT}/analytics"
+# Input data can come from another root / dataset name than where BQ2 writes (e.g. BQ1's shared data):
+#   AML_DATA_ROOT=s3://<bucket>  (curated/ is read there; default AML_ROOT)
+#   AML_SRC_DATASET=HI-Large-live (the dataset partition read; default = the dataset argument, which still
+#                                  names everything BQ2 writes, so the dashboard and decisions keep "HI-Large")
+DATA_ROOT = os.environ.get("AML_DATA_ROOT", "").rstrip("/") or ROOT
+SRC = os.environ.get("AML_SRC_DATASET", "") or DATASET
+CURATED, ANALYTICS = f"{DATA_ROOT}/curated", f"{ROOT}/analytics"
 
 spark = SparkSession.builder.appName(f"BQ2IbmPrep-{DATASET}").getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
@@ -57,6 +63,11 @@ spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 spark.conf.set("spark.sql.ansi.enabled", "false")
 spark.conf.set("spark.sql.shuffle.partitions", os.environ.get("AML_SHUFFLE", "200"))
 spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "20000")
+
+
+def model_path(d):
+    """A BQ2_MODELS folder: absolute s3:// path, or relative to AML_ROOT."""
+    return d.rstrip("/") if d.startswith("s3://") else f"{ROOT}/{d.strip('/')}"
 
 
 def text(path):
@@ -74,12 +85,27 @@ def put_text(uri, body):
         f.write(body.encode())
 
 
+def drop_missing_models():
+    """BQ2_MODELS entries ending in "?" are optional (e.g. the retrained challenger before any retrain): skipped
+    while their folder has no meta.json."""
+    for m, d in list(MODELS.items()):
+        if d.endswith("?"):
+            MODELS[m] = d = d[:-1]
+            try:
+                text(f"{model_path(d)}/meta.json")
+            except Exception:
+                print(f"[bq2] optional model {m} ({d}) not trained yet: skipped")
+                del MODELS[m]
+
+
 def validation(m, meta, booster):
     """Score the HI-Small / HI-Medium validation days (after each training end) with model m."""
     feats, thr = meta["stage1_features"], float(meta["threshold"])
     excl = list(meta.get("excluded_patterns") or [])
     cond = None
     for d, end in meta["train_end"].items():
+        if d == SRC:        # a retrain that added HI-Large weeks: validation stays HI-Small + HI-Medium
+            continue
         c = (F.col("dataset") == d) & (F.col("date") > F.lit(end).cast("date"))
         cond = c if cond is None else (cond | c)
     v = spark.read.parquet(f"{CURATED}/{meta['txn_table']}").filter(cond).select("label", "pattern_label", *feats)
@@ -112,8 +138,13 @@ def validation(m, meta, booster):
 
 
 def main():
-    metas = {m: json.loads(text(f"{ROOT}/{d.strip('/')}/meta.json")) for m, d in MODELS.items()}
-    boosters = {m: text(f"{ROOT}/{d.strip('/')}/stage1.txt") for m, d in MODELS.items()}
+    drop_missing_models()
+    # the new-tactic test's v1 (the model a retrain gives): BQ2_NT_V1 once it exists (e.g. "retrained"), else BQ1's model
+    v1 = os.environ.get("BQ2_NT_V1", "all")
+    PLAN[NT]["v1"] = v1 if v1 in MODELS else "all"
+    print(f"[ibm-prep] models {MODELS}; plan {PLAN}")
+    metas = {m: json.loads(text(f"{model_path(d)}/meta.json")) for m, d in MODELS.items()}
+    boosters = {m: text(f"{model_path(d)}/stage1.txt") for m, d in MODELS.items()}
     thr = {m: float(metas[m]["threshold"]) for m in MODELS}
 
     # ---- 1. meta.json per evaluation dataset x version (validation scored once per model).
@@ -125,7 +156,9 @@ def main():
         except Exception:
             return None
     have = {(d, v): existing(d, v) for d, vs in PLAN.items() for v in vs}
-    reuse = os.environ.get("BQ2_REUSE_META", "1") == "1" and all(have.values())
+    # reused only if each meta.json was made from the model folder in use now (a model swap rescores)
+    reuse = (os.environ.get("BQ2_REUSE_META", "1") == "1" and all(have.values())
+             and all(have[(d, v)].get("model_folder") == MODELS[m] for d, vs in PLAN.items() for v, m in vs.items()))
     if reuse:
         print("[ibm-prep] validation already scored: reusing models/bq2r/*/meta.json")
     vals = {} if reuse else {m: validation(m, metas[m], boosters[m]) for m in MODELS}
@@ -145,9 +178,9 @@ def main():
     # ---- 2. analytics/bq2r_scores: every laundering payment of the window + every flagged payment
     win = (F.col("date") >= F.lit(MON_FROM).cast("date")) & (F.col("date") <= F.lit(MON_TO).cast("date"))
     laund = (spark.read.parquet(f"{CURATED}/{metas['all']['txn_table']}")
-             .filter((F.col("dataset") == DATASET) & win & (F.col("label") == 1))
+             .filter((F.col("dataset") == SRC) & win & (F.col("label") == 1))
              .select("txn_id", "date", "week", "label", "pattern_label"))
-    flag = (spark.read.parquet(f"{ANALYTICS}/bq2_flagged_payments").filter((F.col("dataset") == DATASET) & win)
+    flag = (spark.read.option("mergeSchema", "true").parquet(f"{ANALYTICS}/bq2_flagged_payments").filter((F.col("dataset") == DATASET) & win)
             .select("txn_id", "date", "week", "label", "pattern_label", *[f"score_{m}" for m in MODELS]))
     base = (laund.join(flag.select("txn_id", *[f"score_{m}" for m in MODELS]), "txn_id", "left")
                  .unionByName(flag.filter("label = 0"))).cache()

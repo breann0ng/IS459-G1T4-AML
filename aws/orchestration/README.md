@@ -38,7 +38,7 @@ arrive one week at a time, like a bank feed: `aml_prepare` refuses them without 
 | `aml_bq1_train.asl.json` | `aml_bq1_train` | by hand (`examples/bq1_train.json`) | Live. Champion rolled back on 9 Nov to `bq1` (better on HI-Large-live 2022-09-26: precision 0.571 vs 0.478, F1 0.550 vs 0.504) |
 | `aml_bq1_score.asl.json` | `aml_bq1_score` | rule `aml-bq1-data-prepared`, or by hand | Live. Tested end to end on HI-Large-live |
 | `aml_bq2_weekly.asl.json` | `aml_bq2_weekly` | weekly schedule (BQ2 team) | Live definition is deployed by the BQ2 team. This file passes the week to `aml_prepare` |
-| `aml_bq2_weekly_ibm.asl.json` | `aml_bq2_weekly_ibm` | BQ2 team | Not deployed yet; runs the shared `jobs/` code |
+| `aml_bq2_weekly_ibm.asl.json` | `aml_bq2_weekly_ibm` | BQ2 team (Tasha) | **Live, identical to AWS (9 Nov).** HI-Large on BQ1's data (`curated/*/dataset=HI-Large-live`): scores BQ1's champion `models/bq1` and `bq2_ibm/models/bq1_nofan179` (same recipe, fan-in / fan-out laundering left out) once BQ1's log says the week is done; Part 1 in weeks with new payments; retraining like SAML behind two approvals. Started by the EventBridge rule `aml-bq2-ibm-after-bq1` (disabled; role `aml-events-bq2-ibm`) or by hand: `{}` = next week, `{"week_index": N}`. Runs the code copy in `bq2_ibm/jobs/` |
 
 ## EventBridge rules
 

@@ -17,6 +17,19 @@ Frozen setup (chosen on HI-Small + HI-Medium validation, never on HI-Large)
 Writes  models/final/stage1.txt, models/final/namer_group.txt, models/final/meta.json
 Next    spark-submit [confs] score_final_spark.py HI-Large        (scores every payment)
         python3 final_group_namer.py HI-Large                      (names the alerts)
+
+BQ2 "new tactic" copy (optional, set by environment so BQ1's own calls are unchanged):
+    AML_EXCLUDE_PATTERNS=fan_in,fan_out   drop the laundering payments of these patterns from training
+                                          (dropped, not relabelled), as if the model had never seen them
+    AML_STAGE1_ONLY=1                     train stage 1 only (no group namer); BQ2 grades payments
+    AML_MODEL_DIR=s3://<bucket>/bq2_ibm/models/bq1_nofan   write here instead of models/<AML_FINAL_RUN>
+    AML_FROZEN_FROM=s3://<bucket>/models/bq1   take threshold, training days, expansion and features from that model's
+                                          meta.json instead of txn_results (for a model trained by hand)
+    AML_EXTRA_SAMPLE=<sample table>|<dataset>   (added AFTER AML_EXCLUDE_PATTERNS, which only applies to BQ1's data) BQ2 retrain: also train on this dataset's sample (all laundering +
+                                          2% of honest payments, already cut at the confirmed-labels date by
+                                          bq2_ibm_retrain_sample_spark.py), e.g. the HI-Large weeks confirmed so far
+    Same features, settings, training days and threshold as the validated run, so the only difference
+    from BQ1's model is the excluded patterns.
 """
 
 import json
@@ -39,6 +52,12 @@ GROUP_RUN = sys.argv[2] if len(sys.argv) > 2 else None    # None = group_stage2.
 TXN_TABLE, ACCT_TABLE = "txn_features_v3", "features_v3"
 MERGE = {"bipartite": "layering", "stack": "layering"}
 MODEL_DIR = f"{T.ROOT}/models/{os.environ.get('AML_FINAL_RUN', 'final')}"   # FINAL_NAME in rebuild_final.sh
+MODEL_DIR = os.environ.get("AML_MODEL_DIR", "").rstrip("/") or MODEL_DIR
+EXCLUDE = [x.strip() for x in os.environ.get("AML_EXCLUDE_PATTERNS", "").split(",") if x.strip()]
+STAGE1_ONLY = os.environ.get("AML_STAGE1_ONLY", "") == "1"
+EXTRA = os.environ.get("AML_EXTRA_SAMPLE", "")
+FROZEN = os.environ.get("AML_FROZEN_FROM", "").rstrip("/")
+EXTRA_INFO = {}
 
 
 def put_text(path, text):
@@ -51,11 +70,21 @@ def put_text(path, text):
 def main():
     t0 = time.time()
     # ---- the validated run: its threshold and split
-    res = S.load_table("txn_results", ds.field("config") == VALIDATED_RUN)
-    thr = float(res["threshold_val_best_f1"].iloc[0])
-    train_end = {k: pd.Timestamp(v).date() for k, v in json.loads(res["train_end_dates"].iloc[0]).items()}
-    expand = float(res["expand"].dropna().iloc[0]) if "expand" in res and res["expand"].notna().any() else 0.0
-    hops = int(res["expand_hops"].dropna().iloc[0]) if expand and "expand_hops" in res else 1
+    if FROZEN:
+        # AML_FROZEN_FROM=<model folder>: copy threshold, training days, alert expansion and the exact feature list
+        # from an existing model's meta.json (a model trained by hand has no txn_results row)
+        ffs, fp = T.fs_path(f"{FROZEN}/meta.json")
+        with ffs.open_input_stream(fp) as f:
+            fm = json.loads(f.read().decode())
+        thr = float(fm["threshold"])
+        train_end = {k: pd.Timestamp(v).date() for k, v in fm["train_end"].items()}
+        expand, hops = float(fm.get("expand") or 0.0), int(fm.get("expand_hops") or 1)
+    else:
+        res = S.load_table("txn_results", ds.field("config") == VALIDATED_RUN)
+        thr = float(res["threshold_val_best_f1"].iloc[0])
+        train_end = {k: pd.Timestamp(v).date() for k, v in json.loads(res["train_end_dates"].iloc[0]).items()}
+        expand = float(res["expand"].dropna().iloc[0]) if "expand" in res and res["expand"].notna().any() else 0.0
+        hops = int(res["expand_hops"].dropna().iloc[0]) if expand and "expand_hops" in res else 1
     print(f"[final] frozen from {VALIDATED_RUN}: threshold {thr:.4f}, alert expansion {expand or 'off'}, "
           f"train end { {k: str(v) for k, v in train_end.items()} }")
 
@@ -76,9 +105,32 @@ def main():
     # ---- stage 1: payment model (same data, features, settings and seed as the validated run)
     sd = T.open_dataset(f"{T.CURATED}/{TXN_TABLE}_sample")
     keep = [c for c in sd.schema.names if c not in ("txn_id", "s_id", "r_id", "week", "pattern_label")]
-    smp = sd.to_table(columns=keep, filter=ds.field("dataset").isin(T.TRAIN_DATASETS)).to_pandas()
+    cols = keep + (["pattern_label"] if (EXCLUDE or EXTRA) else [])
+    smp = sd.to_table(columns=cols, filter=ds.field("dataset").isin(T.TRAIN_DATASETS)).to_pandas()
+    if EXCLUDE:
+        n0 = len(smp)
+        smp = smp[~smp["pattern_label"].isin(EXCLUDE)].reset_index(drop=True)
+        print(f"[final] excluded {EXCLUDE}: dropped {n0 - len(smp)} laundering payments from training")
+    if EXTRA:
+        path, xds = EXTRA.split("|")
+        x = T.open_dataset(path).to_table(columns=cols, filter=ds.field("dataset") == xds).to_pandas()
+        if x.empty:
+            raise SystemExit(f"AML_EXTRA_SAMPLE: no rows for {xds} in {path}")
+        x_end = pd.to_datetime(x["date"]).dt.date.max()
+        train_end[xds] = x_end
+        print(f"[final] extra training data: {xds} up to {x_end}: {len(x)} payments ({int(x['label'].sum())} laundering)")
+        smp = pd.concat([smp, x[smp.columns]], ignore_index=True)
+        learned = sorted(set(x.loc[x["label"] == 1, "pattern_label"].dropna().unique()))
+        EXTRA_INFO.update({"dataset": xds, "to": str(x_end), "payments": int(len(x)),
+                           "laundering": int(x["label"].sum()), "patterns": learned})
     smp["date"] = pd.to_datetime(smp["date"]).dt.date
     feat = T.drop_features([c for c in smp.columns if c not in T.META])
+    if FROZEN and fm.get("stage1_features"):
+        missing = [c for c in fm["stage1_features"] if c not in smp.columns]
+        if missing:
+            raise SystemExit(f"[final] {len(missing)} features of {FROZEN} are not in the training sample: {missing[:5]}")
+        feat = list(fm["stage1_features"])
+        print(f"[final] features copied from {FROZEN}: {len(feat)}")
     m = np.zeros(len(smp), dtype=bool)
     for d, end in train_end.items():
         m |= (smp["dataset"] == d).to_numpy() & (smp["date"] <= end).to_numpy()
@@ -91,6 +143,18 @@ def main():
     put_text(f"{MODEL_DIR}/stage1.txt", stage1.booster_.model_to_string())
     print(f"[final] stage 1 trained on {len(tr)} payments ({n_pos} laundering), {len(feat)} features")
     del smp, tr
+    if STAGE1_ONLY:
+        meta = {"validated_run": VALIDATED_RUN, "threshold": thr,
+                "train_end": {k: str(v) for k, v in train_end.items()},
+                "txn_table": TXN_TABLE, "stage1_features": feat, "stage1_params": dict(params),
+                "expand": expand, "expand_hops": hops,
+                # patterns the model never saw: excluded from BQ1's data and not in the added cases either
+                "excluded_patterns": [p for p in EXCLUDE if p not in EXTRA_INFO.get("patterns", [])],
+                "base_excluded_patterns": EXCLUDE, "extra_training": EXTRA_INFO or None,
+                "stage1_only": True, "trained_at": T.RUN_AT}
+        put_text(f"{MODEL_DIR}/meta.json", json.dumps(meta, indent=1, default=str))
+        print(f"[final] saved {MODEL_DIR} (stage1.txt, meta.json; stage 1 only) in {time.time() - t0:.0f}s")
+        return
 
     # ---- stage 2: group namer (same recipe as group_stage2.py)
     a = S.open_dataset(f"{S.CURATED}/{ACCT_TABLE}_sample").to_table(
@@ -122,9 +186,9 @@ def main():
             "expand": expand, "expand_hops": hops, "group_run": GROUP_RUN,
             "context": bool(st["context"]), "group_vote": bool(st["group_vote"]),
             "class_scale": st.get("class_scale") or {},
-            "namer_params": S.STAGE2_PARAMS, "trained_at": T.RUN_AT}
+            "namer_params": S.STAGE2_PARAMS, "excluded_patterns": EXCLUDE, "trained_at": T.RUN_AT}
     put_text(f"{MODEL_DIR}/meta.json", json.dumps(meta, indent=1, default=str))
-    print(f"[final] saved models/final/ (stage1.txt, namer_group.txt, meta.json) in {time.time() - t0:.0f}s")
+    print(f"[final] saved {MODEL_DIR} (stage1.txt, namer_group.txt, meta.json) in {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":
